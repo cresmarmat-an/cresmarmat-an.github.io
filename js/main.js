@@ -1,19 +1,18 @@
-/* Projects sync from github.com/cresmarmat-an through the public GitHub API.
+/* Projects come straight from GitHub. On every visit the visitor's browser asks the
+   public GitHub API for github.com/cresmarmat-an's repos; there is no server in between.
    Every public repo that isn't a fork shows up automatically with its description,
    language, topics, stars, license and last push, so publishing (or editing a repo's
-   description/topics on GitHub) is all it takes to update this page.
-   The last good response is cached in the browser: repeat visits render instantly
-   and keep working when the API's 60-requests-an-hour limit runs out.
-   FALLBACK is only used when GitHub can't be reached and nothing is cached. */
+   description/topics on GitHub) is all it takes to update this page. Each card's name
+   is the first heading of that repo's README, also read from GitHub.
+   The last good response is kept in the browser only as a stand-in: it fills the grid
+   while GitHub answers, and stays up if GitHub can't be reached or the visitor has used
+   up GitHub's 60-requests-an-hour limit. FALLBACK is used only when there is neither. */
 
 const USER = "cresmarmat-an";
 const API = "https://api.github.com/users/" + USER + "/repos?type=owner&sort=pushed&per_page=100";
 const CACHE_KEY = "cm-repos-v2";
-const FRESH_MS = 10 * 60 * 1000; // ask GitHub again at most every 10 minutes
 const SKIP = new Set([".github", USER, USER + ".github.io"]);
-// Display names that can't be derived from the repo name. Everything else is automatic:
-// "roblox-spark2d" becomes "Spark2D", "roblox-signal" becomes "Signal".
-const NAMES = { "roblox-studiowally-plugin": "Wally Studio" };
+const TITLES_KEY = "cm-titles-v1";
 
 // snapshot of the repos (Sep 2026), same shape as the API
 const FALLBACK = [
@@ -86,6 +85,7 @@ function lite(r) {
   };
 }
 
+// used until (or if) the README has no usable heading: "roblox-spark2d" -> "Spark2D"
 function prettyName(repo) {
   return repo
     .replace(/^roblox-/i, "")
@@ -112,7 +112,7 @@ function toProject(r) {
   const license = r.license && r.license !== "NOASSERTION" && r.license !== "other" ? r.license : "";
   return {
     repo: r.name,
-    name: NAMES[r.name] || prettyName(r.name),
+    name: titleFor(r) || prettyName(r.name),
     desc: r.description.trim(),
     lang: r.language,
     url: "https://github.com/" + USER + "/" + encodeURIComponent(r.name),
@@ -137,12 +137,83 @@ function writeCache(repos) {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), repos })); } catch { /* private mode */ }
 }
 
+/* names: first heading of each README, re-read only after that repo gets a new push */
+
+let titles = {};
+try { titles = JSON.parse(localStorage.getItem(TITLES_KEY)) || {}; } catch { titles = {}; }
+
+function titleFor(r) {
+  const t = titles[r.name];
+  return t && t.t ? t.t : "";
+}
+
+function parseTitle(md) {
+  const head = md.split(/^\s*(?:```|~~~)/m)[0]; // ignore anything from the first code block on
+  const m = head.match(/^ {0,3}#[ \t]+(.+?)[ \t#]*$/m) || head.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  if (!m) return "";
+  const t = m[1]
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // badges and images
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // links -> their text
+    .replace(/<[^>]*>/g, "")
+    .replace(/[`*_~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length <= 40 ? t : "";
+}
+
+async function fetchTitle(repo) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch("https://raw.githubusercontent.com/" + USER + "/" + encodeURIComponent(repo) + "/HEAD/README.md", { signal: ctl.signal });
+    return res.ok ? parseTitle((await res.text()).slice(0, 6000)) : "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function syncTitles(repos) {
+  const stale = repos.filter((r) => !titles[r.name] || titles[r.name].at !== r.pushed_at);
+  if (!stale.length) return;
+  const got = await Promise.allSettled(stale.map((r) => fetchTitle(r.name)));
+  got.forEach((g, i) => {
+    // a failed request is retried next visit; a README without a heading is remembered
+    if (g.status === "fulfilled") titles[stale[i].name] = { t: g.value, at: stale[i].pushed_at };
+  });
+  const keep = new Set(repos.map((r) => r.name));
+  Object.keys(titles).forEach((k) => { if (!keep.has(k)) delete titles[k]; });
+  try { localStorage.setItem(TITLES_KEY, JSON.stringify(titles)); } catch { /* private mode */ }
+  renameCards(repos);
+}
+
+// swap names on the cards already on screen instead of rebuilding them
+function renameCards(repos) {
+  let changed = false;
+  repos.forEach((r) => {
+    const p = projects.find((x) => x.repo === r.name);
+    const name = titleFor(r) || prettyName(r.name);
+    if (!p || p.name === name) return;
+    p.name = name;
+    const a = cards.get(p.repo).querySelector("h3 a");
+    a.firstChild.textContent = name;
+    changed = true;
+  });
+  if (!changed) return;
+  if (sortBy === "name" || query) applyView(true);
+  updateLatest();
+}
+
 async function fetchRepos() {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 9000);
   try {
-    const res = await fetch(API, { signal: ctl.signal, headers: { Accept: "application/vnd.github+json" } });
-    if (!res.ok) throw new Error(res.status === 403 || res.status === 429 ? "rate" : "http " + res.status);
+    // no-cache: always check with GitHub rather than reusing the browser's copy
+    const res = await fetch(API, { signal: ctl.signal, cache: "no-cache", headers: { Accept: "application/vnd.github+json" } });
+    if (!res.ok) {
+      const err = new Error("http " + res.status);
+      if (res.headers.get("x-ratelimit-remaining") === "0") err.resetAt = Number(res.headers.get("x-ratelimit-reset")) * 1000 || 1;
+      throw err;
+    }
     const data = await res.json();
     if (!Array.isArray(data)) throw new Error("shape");
     return data.filter((r) => r && !r.fork && !r.private && !SKIP.has(r.name)).map(lite);
@@ -332,37 +403,59 @@ function render(repos) {
   updateLatest();
 }
 
-function setSync(state, at) {
+function setSync(state, at, resetAt) {
   sync.dataset.state = state;
   const n = projects.length;
   const count = n === 1 ? "1 project" : n + " projects";
   syncRetry.hidden = state === "live" || state === "syncing";
-  sync.title = at ? "Last synced " + new Date(at).toLocaleString() : "";
-  if (state === "syncing") syncText.textContent = "Syncing with GitHub…";
+  sync.title = state === "live" ? "Fetched from GitHub at " + new Date(at).toLocaleTimeString() : at ? "Saved copy from " + new Date(at).toLocaleString() : "";
+  const copy = at ? "showing the copy from " + ago(at) : "showing a saved copy";
+  if (state === "syncing") syncText.textContent = "Checking GitHub…";
   else if (state === "live") syncText.textContent = "Live from GitHub · " + count;
-  else if (state === "cached") syncText.textContent = "Saved copy from " + ago(at) + " · GitHub didn't respond";
-  else syncText.textContent = "Offline copy · couldn't reach GitHub";
-}
-
-async function syncProjects(force) {
-  const cached = readCache();
-  if (cached) render(cached.repos);
-  if (cached && !force && Date.now() - cached.at < FRESH_MS) { setSync("live", cached.at); return; }
-  if (!cached || force) setSync("syncing");
-  try {
-    const repos = await fetchRepos();
-    if (!repos.length) throw new Error("empty");
-    writeCache(repos);
-    render(repos);
-    setSync("live", Date.now());
-  } catch {
-    if (cached) { setSync("cached", cached.at); return; }
-    render(FALLBACK.map(lite));
-    setSync("offline");
+  else if (state === "limited") {
+    const mins = resetAt > 1 ? Math.max(1, Math.ceil((resetAt - Date.now()) / 60000)) : 0;
+    syncText.textContent = "GitHub's hourly limit reached" + (mins ? ", try again in " + mins + " min" : "") + " · " + copy;
   }
+  else if (state === "cached") syncText.textContent = "Couldn't reach GitHub · " + copy;
+  else syncText.textContent = "Couldn't reach GitHub · showing a built-in list";
 }
 
-syncRetry.addEventListener("click", () => syncProjects(true));
+let lastFetch = 0;
+let inFlight = null;
+function syncProjects() {
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    const cached = readCache();
+    // stand-in while GitHub answers, never a substitute for asking
+    if (cached && !projects.length) render(cached.repos);
+    if (!lastFetch) setSync("syncing");
+    try {
+      const repos = await fetchRepos();
+      if (!repos.length) throw new Error("empty");
+      lastFetch = Date.now();
+      writeCache(repos);
+      render(repos);
+      setSync("live", lastFetch);
+      syncTitles(repos).catch(() => { /* names fall back to the repo name */ });
+    } catch (err) {
+      if (projects.length) {
+        setSync(err.resetAt ? "limited" : "cached", lastFetch || (cached && cached.at), err.resetAt);
+      } else {
+        render(FALLBACK.map(lite));
+        setSync("offline");
+      }
+    } finally {
+      inFlight = null;
+    }
+  })();
+  return inFlight;
+}
+
+syncRetry.addEventListener("click", () => syncProjects());
+// coming back to the tab picks up anything published in the meantime
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() - lastFetch > 60000) syncProjects();
+});
 
 /* search + sort */
 search.addEventListener("input", () => {
@@ -597,4 +690,4 @@ syncTheme();
 observeReveals();
 spy();
 onScroll();
-syncProjects(false);
+syncProjects();

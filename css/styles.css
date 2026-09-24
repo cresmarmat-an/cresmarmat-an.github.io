@@ -182,7 +182,7 @@ html:not(.js) .tech-chip,html:not(.js) .skeleton,html:not(.js) .toolbar,html:not
 .sync:not(:has(.sync-retry:not([hidden]))){padding-right:16px}
 .sync-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0;animation:breathe 1.2s ease-in-out infinite alternate}
 .sync[data-state="live"] .sync-dot{background:var(--ok);animation:none}
-.sync[data-state="cached"] .sync-dot,.sync[data-state="offline"] .sync-dot{background:var(--warn);animation:none}
+.sync[data-state="cached"] .sync-dot,.sync[data-state="limited"] .sync-dot,.sync[data-state="offline"] .sync-dot{background:var(--warn);animation:none}
 @keyframes breathe{to{opacity:.3}}
 .sync-retry{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:4px 12px;border:0;border-radius:999px;background:var(--card);box-shadow:var(--shadow-sm);font-size:.8rem;font-weight:600;cursor:pointer}
 .sync-retry:active{box-shadow:var(--shadow-in-sm)}
