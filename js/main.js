@@ -1,196 +1,510 @@
-/* Projects load live from github.com/cresmarmat-an. FALLBACK is used offline or if the API limit is hit. */
+/* Projects sync from github.com/cresmarmat-an through the public GitHub API.
+   Every public repo that isn't a fork shows up automatically with its description,
+   language, topics, stars, license and last push, so publishing (or editing a repo's
+   description/topics on GitHub) is all it takes to update this page.
+   The last good response is cached in the browser: repeat visits render instantly
+   and keep working when the API's 60-requests-an-hour limit runs out.
+   FALLBACK is only used when GitHub can't be reached and nothing is cached. */
+
+const USER = "cresmarmat-an";
+const API = "https://api.github.com/users/" + USER + "/repos?type=owner&sort=pushed&per_page=100";
+const CACHE_KEY = "cm-repos-v2";
+const FRESH_MS = 10 * 60 * 1000; // ask GitHub again at most every 10 minutes
+const SKIP = new Set([".github", USER, USER + ".github.io"]);
+// Display names that can't be derived from the repo name. Everything else is automatic:
+// "roblox-spark2d" becomes "Spark2D", "roblox-signal" becomes "Signal".
+const NAMES = { "roblox-studiowally-plugin": "Wally Studio" };
+
+// snapshot of the repos (Sep 2026), same shape as the API
 const FALLBACK = [
-  { title: "roblox-signal", desc: "A pure-Luau replacement for BindableEvent.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-signal" },
-  { title: "roblox-promise", desc: "My take on the roblox-lua-promise library, with extra features and tweaks I needed.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-promise" },
-  { title: "roblox-pool", desc: "A generic object pool. Reuse instances instead of creating and destroying them.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-pool" },
-  { title: "roblox-remotes", desc: "A lightweight remote management module. Less boilerplate around RemoteEvents.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-remotes" },
-  { title: "roblox-mimic", desc: "Typed, immutable server to client state replication.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-mimic" },
-  { title: "roblox-loader", desc: "A module bootstrapper. One place to load everything in order.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-loader" },
-  { title: "roblox-cleaner", desc: "Resource management and lifecycle cleanup. Connections and instances handled in one spot.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-cleaner" },
-  { title: "roblox-compressor", desc: "Binary serialization for Roblox. Smaller payloads over remotes and datastores.", lang: "Lua", github: "https://github.com/cresmarmat-an/roblox-compressor" },
-  { title: "roblox-persistence", desc: "A DataStore wrapper that makes saving data less painful.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-persistence" },
-  { title: "roblox-spark2d", desc: "ParticleEmitter-style effects inside a ScreenGui.", lang: "Luau", github: "https://github.com/cresmarmat-an/roblox-spark2d" },
+  { name: "roblox-studiowally-plugin", description: "A Roblox Studio plugin that lets you install and update Wally packages directly, without needing an external setup like Rojo.", language: "Lua", stargazers_count: 0, pushed_at: "2026-09-17T19:49:39Z" },
+  { name: "roblox-compressor", description: "Binary serialization for Roblox.", language: "Lua", stargazers_count: 0, pushed_at: "2026-09-11T19:49:05Z", license: "MIT" },
+  { name: "roblox-persistence", description: "Persistence is a DataStore wrapper that makes data saving easier in Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-09-11T14:03:40Z", license: "MIT" },
+  { name: "roblox-pool", description: "A generic object pool for Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-30T00:19:05Z", license: "MIT" },
+  { name: "roblox-spark2d", description: "Spark2D makes ParticleEmitter-style effects work inside a ScreenGui.", language: "Luau", stargazers_count: 3, pushed_at: "2026-08-26T21:51:22Z", license: "MIT" },
+  { name: "roblox-mimic", description: "Mimic is typed, immutable server to client state replication for Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-25T07:18:45Z", license: "MIT" },
+  { name: "roblox-signal", description: "A pure-Luau replacement for BindableEvent for Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-24T13:06:51Z", license: "MIT" },
+  { name: "roblox-remotes", description: "A lightweight remote management module for Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-24T12:53:03Z", license: "MIT" },
+  { name: "roblox-promise", description: "This is a modified version of the roblox-lua-promise library. I created this version to add specific features and optimizations not present in the original repository.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-24T12:44:30Z", license: "MIT" },
+  { name: "roblox-loader", description: "A module bootstrapper for Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-24T12:33:17Z", license: "MIT" },
+  { name: "roblox-cleaner", description: "Cleaner is a resource management and lifecycle cleanup utility for Roblox.", language: "Luau", stargazers_count: 0, pushed_at: "2026-08-24T12:14:11Z", license: "MIT" },
 ];
 
 const LANG_ICON = {
-  Luau: "assets/img/icons/lua-original.svg",
+  Luau: "assets/img/icons/luau.svg",
   Lua: "assets/img/icons/lua-original.svg",
+  JavaScript: "assets/img/icons/javascript-original.svg",
+  TypeScript: "assets/img/icons/typescript-original.svg",
   Python: "assets/img/icons/python-original.svg",
-  "C++": "assets/img/icons/cplusplus-original.svg",
-  Rust: "assets/img/icons/rust-original.svg",
   HTML: "assets/img/icons/html5-original.svg",
   CSS: "assets/img/icons/css3-original.svg",
-  JavaScript: "assets/img/icons/javascript-original.svg",
-  TypeScript: "assets/img/icons/javascript-original.svg",
-  Git: "assets/img/icons/git-original.svg",
+  C: "assets/img/icons/c-original.svg",
+  "C#": "assets/img/icons/csharp-original.svg",
+  "C++": "assets/img/icons/cplusplus-original.svg",
+  Rust: "assets/img/icons/rust-original.svg",
+};
+const MONO_ICONS = new Set(["Lua", "Rust"]); // dark glyphs that need lifting in dark mode
+
+// Lucide icons (ISC)
+const svg = (inner, size) =>
+  '<svg width="' + (size || 15) + '" height="' + (size || 15) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + inner + "</svg>";
+const ICON = {
+  arrow: svg('<path d="M7 7h10v10"/><path d="M7 17 17 7"/>', 18),
+  star: svg('<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>'),
+  fork: svg('<circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9"/><path d="M12 12v3"/>'),
+  clock: svg('<circle cx="12" cy="12" r="10"/><path d="M12 6v6h4"/>'),
+  scale: svg('<path d="M12 3v18"/><path d="m19 8 3 8a5 5 0 0 1-6 0zV7"/><path d="M3 7h1a17 17 0 0 0 8-2 17 17 0 0 0 8 2h1"/><path d="m5 8 3 8a5 5 0 0 1-6 0zV7"/><path d="M7 21h10"/>'),
+  link: svg('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>', 14),
 };
 
-const grid = document.getElementById("projects-grid");
-const modal = document.getElementById("project-modal");
-const mTitle = document.getElementById("modal-title");
-const mDesc = document.getElementById("modal-desc");
-const mLang = document.getElementById("modal-lang");
-const mLangIcon = document.getElementById("modal-lang-icon");
-const mMeta = document.getElementById("modal-meta");
-const mGithub = document.getElementById("modal-github");
-const mLive = document.getElementById("modal-live");
+const root = document.documentElement;
+const calmMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const EASE = "cubic-bezier(.23,1,.32,1)";
 
-function esc(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
 }
+
+/* ---------- data ---------- */
+
+// keep only the fields the page uses, in the same shape the cache and FALLBACK use
+function lite(r) {
+  return {
+    name: r.name,
+    description: r.description || "",
+    language: r.language || "",
+    stargazers_count: r.stargazers_count || 0,
+    forks_count: r.forks_count || 0,
+    pushed_at: r.pushed_at || "",
+    homepage: r.homepage || "",
+    topics: Array.isArray(r.topics) ? r.topics : [],
+    license: r.license && typeof r.license === "object" ? r.license.spdx_id || "" : r.license || "",
+    archived: !!r.archived,
+  };
+}
+
+function prettyName(repo) {
+  return repo
+    .replace(/^roblox-/i, "")
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ")
+    .replace(/(\d)d\b/g, "$1D");
+}
+
+function safeHome(url, repo) {
+  if (!url) return "";
+  try {
+    const u = new URL(/^[a-z][a-z\d+.-]*:/i.test(url) ? url : "https://" + url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return "";
+    if (u.hostname === "github.com" && u.pathname.replace(/\/+$/, "").toLowerCase() === ("/" + USER + "/" + repo).toLowerCase()) return "";
+    return u.href;
+  } catch {
+    return "";
+  }
+}
+
+function toProject(r) {
+  const license = r.license && r.license !== "NOASSERTION" && r.license !== "other" ? r.license : "";
+  return {
+    repo: r.name,
+    name: NAMES[r.name] || prettyName(r.name),
+    desc: r.description.trim(),
+    lang: r.language,
+    url: "https://github.com/" + USER + "/" + encodeURIComponent(r.name),
+    home: safeHome(r.homepage, r.name),
+    stars: r.stargazers_count,
+    forks: r.forks_count || 0,
+    license,
+    topics: (r.topics || []).slice(0, 4),
+    pushed: Date.parse(r.pushed_at) || 0,
+    archived: !!r.archived,
+  };
+}
+
+function readCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(CACHE_KEY));
+    if (c && typeof c.at === "number" && Array.isArray(c.repos) && c.repos.length) return c;
+  } catch { /* storage blocked or corrupt: just refetch */ }
+  return null;
+}
+function writeCache(repos) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), repos })); } catch { /* private mode */ }
+}
+
+async function fetchRepos() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 9000);
+  try {
+    const res = await fetch(API, { signal: ctl.signal, headers: { Accept: "application/vnd.github+json" } });
+    if (!res.ok) throw new Error(res.status === 403 || res.status === 429 ? "rate" : "http " + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error("shape");
+    return data.filter((r) => r && !r.fork && !r.private && !SKIP.has(r.name)).map(lite);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ---------- time ---------- */
+
+const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+const UNITS = [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]];
+function ago(t) {
+  if (!t) return "";
+  const s = (t - Date.now()) / 1000;
+  for (const [unit, sec] of UNITS) if (Math.abs(s) >= sec) return rtf.format(Math.round(s / sec), unit);
+  return "just now";
+}
+function fullDate(t) {
+  return new Date(t).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
+
+/* ---------- projects ---------- */
+
+const grid = document.getElementById("projects-grid");
+const empty = document.getElementById("empty");
+const emptyQ = document.getElementById("empty-q");
+const search = document.getElementById("search");
+const searchClear = document.getElementById("search-clear");
+const sortSet = document.getElementById("sort");
+const sync = document.getElementById("sync");
+const syncText = document.getElementById("sync-text");
+const syncRetry = document.getElementById("sync-retry");
+
+let projects = [];
+let cards = new Map();
+let sortBy = "recent";
+let query = "";
+let lastData = "";
 
 function langBadge(lang) {
+  const b = el("span", "lang-badge");
   const src = LANG_ICON[lang];
-  if (src) return '<span class="lang"><img src="' + src + '" alt="" loading="lazy">' + esc(lang) + "</span>";
-  return '<span class="lang"><i class="dot"></i>' + esc(lang) + "</span>";
+  if (src) {
+    const img = el("img", MONO_ICONS.has(lang) ? "icon-mono" : null);
+    img.src = src;
+    img.alt = "";
+    img.width = 16;
+    img.height = 16;
+    img.loading = "lazy";
+    b.append(img);
+  } else {
+    b.append(el("i", "lang-dot"));
+  }
+  b.append(lang || "Code");
+  return b;
 }
 
-function renderProjects(list) {
-  grid.innerHTML = "";
-  list.forEach((p, i) => {
-    const row = document.createElement("article");
-    row.className = "proj-row reveal";
-    row.style.transitionDelay = `${Math.min(i * 40, 280)}ms`;
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.setAttribute("aria-label", p.title + ", open details");
-    row.innerHTML =
-      '<div class="proj-main"><h3>' + esc(p.title) + "</h3><p>" + esc(p.desc) + "</p></div>" +
-      '<div class="proj-meta">' + langBadge(p.lang) +
-      '<a class="icon-btn icon-sm" href="' + p.github + '" target="_blank" rel="noopener" aria-label="Open ' + esc(p.title) + ' on GitHub">' +
-      '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.93c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.2.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5z"/></svg></a></div>';
-    row.addEventListener("click", (e) => {
-      if (e.target.closest("a")) return;
-      openModal(p);
+function metaItem(icon, text, title) {
+  const li = el("li");
+  li.innerHTML = icon;
+  li.append(text);
+  if (title) li.title = title;
+  return li;
+}
+
+function buildCard(p) {
+  const card = el("article", "proj-card reveal" + (p.archived ? " archived" : ""));
+  card.dataset.repo = p.repo;
+
+  const top = el("div", "proj-top");
+  const go = el("span", "proj-go");
+  go.innerHTML = ICON.arrow;
+  top.append(langBadge(p.lang), go);
+
+  const h3 = el("h3");
+  const a = el("a", null, p.name);
+  a.href = p.url;
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.append(el("span", "sr-only", " (opens on GitHub)"));
+  h3.append(a);
+
+  card.append(top, h3, el("p", "proj-repo", p.repo), el("p", "proj-desc", p.desc || "No description yet."));
+
+  const tags = p.archived ? ["archived", ...p.topics] : p.topics;
+  if (tags.length) {
+    const ul = el("ul", "proj-topics");
+    ul.setAttribute("aria-label", "Topics");
+    tags.forEach((t) => ul.append(el("li", null, t)));
+    card.append(ul);
+  }
+
+  const meta = el("ul", "proj-meta");
+  if (p.stars > 0) meta.append(metaItem(ICON.star, String(p.stars), p.stars === 1 ? "1 star" : p.stars + " stars"));
+  if (p.forks > 0) meta.append(metaItem(ICON.fork, String(p.forks), p.forks === 1 ? "1 fork" : p.forks + " forks"));
+  if (p.pushed) meta.append(metaItem(ICON.clock, "Updated " + ago(p.pushed), "Last push " + fullDate(p.pushed)));
+  if (p.license) meta.append(metaItem(ICON.scale, p.license, p.license + " license"));
+  if (p.home) {
+    const li = el("li");
+    const home = el("a", "home-link");
+    home.href = p.home;
+    home.target = "_blank";
+    home.rel = "noopener";
+    home.innerHTML = ICON.link;
+    home.append("Website");
+    home.setAttribute("aria-label", p.name + " website");
+    li.append(home);
+    li.style.marginLeft = "auto";
+    meta.append(li);
+  }
+  if (meta.children.length) card.append(meta);
+  return card;
+}
+
+function matches(p, words) {
+  if (!words.length) return true;
+  const hay = [p.name, p.repo, p.desc, p.lang, ...p.topics].join(" ").toLowerCase();
+  return words.every((w) => hay.includes(w));
+}
+
+const SORTS = {
+  recent: (a, b) => b.pushed - a.pushed,
+  stars: (a, b) => b.stars - a.stars || b.pushed - a.pushed,
+  name: (a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base" }),
+};
+
+// reorder/filter the existing cards; FLIP so they glide to their new spots
+function applyView(animate) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const sorted = projects.slice().sort((a, b) => (a.archived - b.archived) || SORTS[sortBy](a, b));
+  const shown = sorted.filter((p) => matches(p, words));
+  const hidden = sorted.filter((p) => !shown.includes(p));
+
+  const canFlip = animate && !calmMotion && typeof Element.prototype.animate === "function";
+  const before = new Map();
+  if (canFlip) cards.forEach((c, k) => { if (!c.hidden) before.set(k, c.getBoundingClientRect()); });
+
+  const frag = document.createDocumentFragment();
+  shown.forEach((p) => { const c = cards.get(p.repo); c.hidden = false; frag.append(c); });
+  hidden.forEach((p) => { const c = cards.get(p.repo); c.hidden = true; frag.append(c); });
+  grid.append(frag);
+
+  if (canFlip) {
+    shown.forEach((p) => {
+      const c = cards.get(p.repo);
+      if (!c.classList.contains("in")) return;
+      const was = before.get(p.repo);
+      if (!was) {
+        c.animate([{ opacity: 0, transform: "scale(.96)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: EASE });
+        return;
+      }
+      const now = c.getBoundingClientRect();
+      const dx = was.left - now.left, dy = was.top - now.top;
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+      c.animate([{ transform: "translate(" + dx + "px," + dy + "px)" }, { transform: "none" }], { duration: 420, easing: EASE });
     });
-    row.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openModal(p); }
-    });
-    grid.appendChild(row);
+  }
+
+  empty.hidden = shown.length > 0 || !projects.length;
+  emptyQ.textContent = "“" + query.trim() + "”";
+}
+
+function render(repos) {
+  const key = JSON.stringify(repos);
+  if (key === lastData) return;
+  const firstPaint = !lastData;
+  lastData = key;
+
+  projects = repos.map(toProject);
+  const next = new Map();
+  projects.forEach((p) => {
+    const c = buildCard(p);
+    // a refresh after the list is already on screen shouldn't replay the entrance
+    if (!firstPaint) c.classList.add("in");
+    next.set(p.repo, c);
   });
+  grid.replaceChildren();
+  cards = next;
+  applyView(false);
+  grid.setAttribute("aria-busy", "false");
+
+  if (firstPaint) {
+    [...grid.children].filter((c) => !c.hidden).forEach((c, i) => { c.style.transitionDelay = Math.min(i * 50, 300) + "ms"; });
+  }
   observeReveals();
+  updateLatest();
 }
 
-async function loadProjects() {
+function setSync(state, at) {
+  sync.dataset.state = state;
+  const n = projects.length;
+  const count = n === 1 ? "1 project" : n + " projects";
+  syncRetry.hidden = state === "live" || state === "syncing";
+  sync.title = at ? "Last synced " + new Date(at).toLocaleString() : "";
+  if (state === "syncing") syncText.textContent = "Syncing with GitHub…";
+  else if (state === "live") syncText.textContent = "Live from GitHub · " + count;
+  else if (state === "cached") syncText.textContent = "Saved copy from " + ago(at) + " · GitHub didn't respond";
+  else syncText.textContent = "Offline copy · couldn't reach GitHub";
+}
+
+async function syncProjects(force) {
+  const cached = readCache();
+  if (cached) render(cached.repos);
+  if (cached && !force && Date.now() - cached.at < FRESH_MS) { setSync("live", cached.at); return; }
+  if (!cached || force) setSync("syncing");
   try {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 9000);
-    const res = await fetch("https://api.github.com/users/cresmarmat-an/repos?per_page=100&sort=updated", {
-      signal: ctl.signal,
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error("api");
-    const data = await res.json();
-    const live = data
-      .filter((r) => !r.fork && r.name !== ".github")
-      .slice(0, 12)
-      .map((r) => ({
-        title: r.name,
-        desc: r.description || "No description yet.",
-        lang: r.language || "Code",
-        github: r.html_url,
-        stars: r.stargazers_count,
-        updated: r.pushed_at,
-        homepage: r.homepage || "",
-      }));
-    renderProjects(live.length ? live : FALLBACK);
+    const repos = await fetchRepos();
+    if (!repos.length) throw new Error("empty");
+    writeCache(repos);
+    render(repos);
+    setSync("live", Date.now());
   } catch {
-    renderProjects(FALLBACK);
+    if (cached) { setSync("cached", cached.at); return; }
+    render(FALLBACK.map(lite));
+    setSync("offline");
   }
 }
 
-function openModal(p) {
-  mTitle.textContent = p.title;
-  mDesc.textContent = p.desc;
-  mLang.textContent = p.lang;
-  mLangIcon.src = LANG_ICON[p.lang] || "assets/img/icons/lua-original.svg";
-  mLangIcon.alt = "";
-  const bits = [];
-  if (typeof p.stars === "number") bits.push((p.stars === 1 ? "1 star" : p.stars + " stars"));
-  if (p.updated) {
-    try {
-      bits.push("Updated " + new Date(p.updated).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }));
-    } catch { /* keep date out if it fails to parse */ }
-  }
-  mMeta.textContent = bits.join("  ·  ");
-  mMeta.style.display = bits.length ? "" : "none";
-  mGithub.href = p.github;
-  if (p.homepage) { mLive.href = p.homepage; mLive.hidden = false; }
-  else { mLive.hidden = true; }
-  modal.classList.add("open");
-  modal.setAttribute("aria-hidden", "false");
-  document.body.style.overflow = "hidden";
-}
-function closeModal() {
-  modal.classList.remove("open");
-  modal.setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "";
-}
-modal.addEventListener("click", (e) => { if (e.target.closest("[data-close]")) closeModal(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeMenu(); } });
+syncRetry.addEventListener("click", () => syncProjects(true));
 
-/* nav */
-const navMenu = document.getElementById("nav-menu");
-const navToggle = document.getElementById("nav-toggle");
-function closeMenu() { navMenu.classList.remove("open"); navToggle.setAttribute("aria-expanded", "false"); }
-navToggle.addEventListener("click", () => {
-  const open = navMenu.classList.toggle("open");
-  navToggle.setAttribute("aria-expanded", String(open));
+/* search + sort */
+search.addEventListener("input", () => {
+  query = search.value;
+  searchClear.hidden = !query;
+  applyView(true);
 });
-navMenu.querySelectorAll("a").forEach((a) => a.addEventListener("click", closeMenu));
+function clearSearch() {
+  search.value = "";
+  query = "";
+  searchClear.hidden = true;
+  applyView(true);
+  search.focus();
+}
+searchClear.addEventListener("click", clearSearch);
+document.getElementById("empty-clear").addEventListener("click", clearSearch);
+search.addEventListener("keydown", (e) => { if (e.key === "Escape" && search.value) { e.stopPropagation(); clearSearch(); } });
+// "/" jumps to search, like on GitHub
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+  e.preventDefault();
+  search.focus({ preventScroll: true });
+  search.scrollIntoView({ block: "center", behavior: calmMotion ? "auto" : "smooth" });
+});
 
-/* scroll spy */
-const links = [...document.querySelectorAll(".nav-link")];
-const secs = ["home", "about", "projects"].map((id) => document.getElementById(id));
-const spy = new IntersectionObserver((es) => {
-  es.forEach((e) => {
-    if (e.isIntersecting) {
-      links.forEach((l) => l.classList.toggle("active", l.getAttribute("href") === "#" + e.target.id));
-    }
-  });
-}, { rootMargin: "-40% 0px -55% 0px" });
-secs.forEach((s) => s && spy.observe(s));
+sortSet.addEventListener("change", (e) => {
+  const input = e.target.closest("input[name=sort]");
+  if (!input) return;
+  sortBy = input.value;
+  sortSet.dataset.i = String(["recent", "stars", "name"].indexOf(sortBy));
+  applyView(true);
+});
 
-/* reveal */
+/* hero: most recent push, straight from the synced data */
+const latest = document.getElementById("latest");
+function updateLatest() {
+  const p = projects.filter((x) => !x.archived && x.pushed).sort(SORTS.recent)[0];
+  if (!p) return;
+  latest.href = p.url;
+  document.getElementById("latest-name").textContent = p.name;
+  document.getElementById("latest-when").textContent = "· " + ago(p.pushed);
+  latest.title = p.name + ", last push " + fullDate(p.pushed);
+  latest.hidden = false;
+}
+
+/* ---------- reveal ---------- */
+
 let revealObs;
 function observeReveals() {
+  const pending = document.querySelectorAll(".reveal:not(.in)");
+  if (!("IntersectionObserver" in window)) { pending.forEach((e) => e.classList.add("in")); return; }
   if (!revealObs) {
     revealObs = new IntersectionObserver((es) => {
-      es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); revealObs.unobserve(e.target); } });
-    }, { threshold: 0.1 });
+      es.forEach((e) => {
+        if (!e.isIntersecting) return;
+        const t = e.target;
+        t.classList.add("in");
+        revealObs.unobserve(t);
+        // drop the stagger once it has played, so later hovers and filters respond instantly
+        if (t.style.transitionDelay) setTimeout(() => { t.style.transitionDelay = ""; }, 800);
+      });
+    }, { threshold: 0.08, rootMargin: "0px 0px -4% 0px" });
   }
-  document.querySelectorAll(".reveal:not(.in)").forEach((el) => revealObs.observe(el));
+  pending.forEach((e) => revealObs.observe(e));
 }
 
-/* theme: auto follows system */
-const root = document.documentElement;
-const themeBtn = document.getElementById("theme-toggle");
-function currentSystem() { return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }
-function initTheme() {
-  const saved = localStorage.getItem("cm-theme") || "auto";
-  root.dataset.theme = saved;
-  syncThemeBtn();
+/* ---------- nav: scroll spy ---------- */
+
+const links = [...document.querySelectorAll(".nav-link")];
+function setActive(id) {
+  links.forEach((l) => {
+    const on = l.getAttribute("href") === "#" + id;
+    l.classList.toggle("active", on);
+    if (on) l.setAttribute("aria-current", "true");
+    else l.removeAttribute("aria-current");
+  });
 }
-function syncThemeBtn() {
-  const mode = root.dataset.theme;
-  const effective = mode === "auto" ? currentSystem() : mode;
-  themeBtn.title = mode === "auto" ? "Theme: system " + effective + ", click to change" : "Theme: " + effective + ", click to change";
+const sectionIds = ["home", "projects"];
+function spy() {
+  // the active section is the last one whose top has passed a line 40% down the viewport
+  const line = innerHeight * 0.4;
+  let current = sectionIds[0];
+  for (const id of sectionIds) {
+    const s = document.getElementById(id);
+    if (s && s.getBoundingClientRect().top <= line) current = id;
+  }
+  if (innerHeight + scrollY >= document.documentElement.scrollHeight - 4) current = sectionIds[sectionIds.length - 1];
+  setActive(current);
+}
+
+/* ---------- theme: system -> light -> dark ---------- */
+
+const themeBtn = document.getElementById("theme-toggle");
+const darkMq = matchMedia("(prefers-color-scheme: dark)");
+const THEME_LABEL = { auto: "System", light: "Light", dark: "Dark" };
+const THEME_ORDER = ["auto", "light", "dark"];
+const themeMetas = [...document.querySelectorAll('meta[name="theme-color"]')].map((m) => ({ m, content: m.content, media: m.media }));
+function syncTheme() {
+  const mode = THEME_ORDER.includes(root.dataset.theme) ? root.dataset.theme : "auto";
+  const effective = mode === "auto" ? (darkMq.matches ? "dark" : "light") : mode;
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(mode) + 1) % THEME_ORDER.length];
+  themeBtn.setAttribute("aria-label", "Color theme: " + THEME_LABEL[mode] + (mode === "auto" ? " (" + effective + ")" : "") + ". Switch to " + THEME_LABEL[next].toLowerCase());
+  themeBtn.title = "Theme: " + THEME_LABEL[mode] + (mode === "auto" ? " (" + effective + ")" : "");
+  // keep the browser UI colour in step with a forced theme
+  themeMetas.forEach(({ m, content, media }) => {
+    if (mode === "auto") { m.content = content; m.media = media; }
+    else { m.content = effective === "dark" ? "#22262F" : "#E0E5EC"; m.removeAttribute("media"); }
+  });
 }
 themeBtn.addEventListener("click", () => {
-  const order = ["auto", "light", "dark"];
-  const next = order[(order.indexOf(root.dataset.theme) + 1) % order.length];
+  const mode = THEME_ORDER.includes(root.dataset.theme) ? root.dataset.theme : "auto";
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(mode) + 1) % THEME_ORDER.length];
   root.dataset.theme = next;
-  localStorage.setItem("cm-theme", next);
-  syncThemeBtn();
+  try { localStorage.setItem("cm-theme", next); } catch { /* not persisted, still applied */ }
+  syncTheme();
 });
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncThemeBtn);
+darkMq.addEventListener("change", syncTheme);
 
-document.getElementById("year").textContent = new Date().getFullYear();
+/* ---------- scroll: progress bar + spy, one rAF per frame ---------- */
 
-/* photo tilt + scroll progress, motion only */
-const finePointer = matchMedia("(hover:hover) and (pointer:fine)").matches;
-const calmMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const progress = document.getElementById("progress");
+let ticking = false;
+function onScroll() {
+  if (ticking) return;
+  ticking = true;
+  requestAnimationFrame(() => {
+    ticking = false;
+    spy();
+    if (progress && !calmMotion) {
+      const max = document.documentElement.scrollHeight - innerHeight;
+      progress.style.transform = "scaleX(" + (max > 0 ? Math.min(scrollY / max, 1).toFixed(4) : 0) + ")";
+    }
+  });
+}
+addEventListener("scroll", onScroll, { passive: true });
+addEventListener("resize", onScroll, { passive: true });
+
+/* ---------- portrait tilt (fine pointers only) ---------- */
+
+const finePointer = matchMedia("(hover: hover) and (pointer: fine)").matches;
 const photoImg = document.querySelector(".photo-blend img");
 const heroPhoto = document.querySelector(".hero-photo");
 if (finePointer && !calmMotion && photoImg && heroPhoto) {
@@ -206,83 +520,81 @@ if (finePointer && !calmMotion && photoImg && heroPhoto) {
     photoImg.style.setProperty("--ry", "0deg");
   });
 }
-const progress = document.getElementById("progress");
-if (progress && !calmMotion) {
-  const onScroll = () => {
-    const max = document.documentElement.scrollHeight - innerHeight;
-    progress.style.transform = "scaleX(" + (max > 0 ? Math.min(scrollY / max, 1).toFixed(3) : 0) + ")";
-  };
-  addEventListener("scroll", onScroll, { passive: true });
-  onScroll();
-}
 
-/* tech chips: continuous flow, max 5 up at once. When one fades out,
-   a new language pops in at a fresh spot with its own random lifetime. */
+/* ---------- tech chips: a few at a time, each at a fresh spot around the portrait ---------- */
+
 const chips = [...document.querySelectorAll(".tech-chip")];
-if (chips.length && !calmMotion) {
-  const MAX = 5, FADE = 450, GAP = 350, MAX_DELAY = 900, MIN_HOLD = 1800, HOLD_RANGE = 2200;
-  const onScreen = () => chips.filter((c) => getComputedStyle(c).display !== "none");
-  const stage = document.querySelector(".hero-photo");
-  const centerOf = (c) => ({
-    x: (parseFloat(c.style.left) || 0) + (c.offsetWidth || 90) / 2,
-    y: (parseFloat(c.style.top) || 0) + (c.offsetHeight || 34) / 2,
-  });
-  // scatter one chip on a ring around the photo, kept clear of the ones already up
+if (chips.length && heroPhoto) {
+  const FADE = 450, GAP = 350, MAX_DELAY = 800, MIN_HOLD = 1900, HOLD_RANGE = 2200;
+  const maxUp = () => (heroPhoto.clientWidth < 420 ? 3 : heroPhoto.clientWidth < 520 ? 4 : 5);
+  const up = () => chips.filter((c) => c.classList.contains("show"));
+  const centerOf = (c) => ({ x: c._x + c.offsetWidth / 2, y: c._y + c.offsetHeight / 2 });
+
+  // pick the spot on a ring around the photo that is furthest from the chips already up
   const place = (c) => {
-    if (!stage) return;
-    const pw = stage.clientWidth, ph = stage.clientHeight;
+    const pw = heroPhoto.clientWidth, ph = heroPhoto.clientHeight;
     if (!pw || !ph) return;
-    const w = c.offsetWidth || 90, h = c.offsetHeight || 34;
-    const cx = pw / 2, cy = ph / 2;
-    const others = [...document.querySelectorAll(".tech-chip.show")].filter((o) => o !== c).map(centerOf);
+    const w = c.offsetWidth, h = c.offsetHeight;
+    const others = up().filter((o) => o !== c && o._x != null).map(centerOf);
     let best = null, bestScore = -1;
-    for (let t = 0; t < 24; t++) {
-      const a = Math.random() * Math.PI * 2;
-      const rx = pw * (0.36 + Math.random() * 0.1);
+    for (let t = 0; t < 28; t++) {
+      // skip the arc straight above the portrait so a chip never sits on the face
+      const a = -Math.PI / 3 + Math.random() * (Math.PI * 5 / 3);
+      const rx = pw * (0.34 + Math.random() * 0.1);
       const ry = ph * (0.36 + Math.random() * 0.1);
-      const x = Math.max(2, Math.min(pw - w - 2, cx + Math.cos(a) * rx - w / 2));
-      const y = Math.max(2, Math.min(ph - h - 2, cy + Math.sin(a) * ry - h / 2));
-      const px = x + w / 2, py = y + h / 2;
-      const score = others.length ? Math.min(...others.map((o) => Math.hypot(px - o.x, py - o.y))) : 1e9;
+      const x = Math.max(2, Math.min(pw - w - 2, pw / 2 + Math.cos(a) * rx - w / 2));
+      const y = Math.max(2, Math.min(ph - h - 2, ph / 2 + Math.sin(a) * ry - h / 2));
+      const score = others.length ? Math.min(...others.map((o) => Math.hypot(x + w / 2 - o.x, y + h / 2 - o.y))) : 1e9;
       if (score > bestScore) { bestScore = score; best = { x, y }; }
-      if (score > 120) break;
+      if (score > Math.max(w, 110)) break;
     }
-    if (best) { c.style.left = best.x + "px"; c.style.top = best.y + "px"; }
+    c._x = best.x; c._y = best.y;
+    c.style.left = best.x + "px";
+    c.style.top = best.y + "px";
   };
+
+  if (calmMotion) {
+    // no cycling: show a fixed handful, spaced out once
+    chips.slice(0, maxUp()).forEach((c) => { place(c); c.classList.add("show"); });
+  } else {
+    let cooldown = null;
+    const showOne = () => {
+      const pool = chips.filter((c) => !c.classList.contains("show") && !c._fading && c !== cooldown);
+      if (!pool.length) return;
+      const c = pool[(Math.random() * pool.length) | 0];
+      place(c);
+      const delay = Math.random() * MAX_DELAY;
+      const hold = MIN_HOLD + Math.random() * HOLD_RANGE;
+      c.style.transitionDelay = delay + "ms";
+      c.style.animationDelay = -Math.random() * 5 + "s";
+      c.classList.add("show");
+      setTimeout(() => {
+        c.style.transitionDelay = "0ms";
+        c.classList.remove("show");
+        c._fading = true; // don't move it while it is still fading out
+        cooldown = c;
+        setTimeout(() => { c._fading = false; refill(); }, FADE + GAP);
+      }, delay + hold);
+    };
+    const refill = () => { if (!document.hidden && up().length < maxUp()) showOne(); };
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) for (let i = 0; i < maxUp(); i++) setTimeout(refill, i * 300); });
+    for (let i = 0; i < maxUp(); i++) setTimeout(refill, 400 + i * 350);
+  }
+  let rt;
   addEventListener("resize", () => {
-    document.querySelectorAll(".tech-chip.show").forEach((c) => place(c));
+    clearTimeout(rt);
+    rt = setTimeout(() => {
+      up().slice(maxUp()).forEach((c) => c.classList.remove("show"));
+      up().forEach(place);
+    }, 120);
   });
-  let cooldown = null;
-  const visibleCount = () => document.querySelectorAll(".tech-chip.show").length;
-  const showOne = () => {
-    let pool = onScreen().filter((c) => !c.classList.contains("show") && c !== cooldown);
-    if (!pool.length) pool = onScreen().filter((c) => !c.classList.contains("show"));
-    if (!pool.length) return;
-    const c = pool[(Math.random() * pool.length) | 0];
-    place(c);
-    const delay = Math.random() * MAX_DELAY;
-    const hold = MIN_HOLD + Math.random() * HOLD_RANGE;
-    c.style.transitionDelay = delay + "ms";
-    c.style.transitionDuration = 350 + Math.random() * 250 + "ms";
-    requestAnimationFrame(() => requestAnimationFrame(() => c.classList.add("show")));
-    setTimeout(() => {
-      c.style.transitionDelay = "0ms";
-      c.classList.remove("show");
-      cooldown = c;
-      setTimeout(() => { if (cooldown === c) cooldown = null; }, 4000);
-      // freed slot fades out first, then a new language takes its place
-      setTimeout(refill, FADE + GAP);
-    }, delay + hold);
-  };
-  const refill = () => {
-    if (visibleCount() < Math.min(MAX, onScreen().length)) showOne();
-  };
-  // fill the stage with a natural trickle instead of all at once
-  for (let i = 0; i < MAX; i++) setTimeout(refill, i * 350);
-} else {
-  chips.forEach((c) => c.classList.add("show"));
 }
 
-initTheme();
-loadProjects();
+/* ---------- boot ---------- */
+
+document.getElementById("year").textContent = new Date().getFullYear();
+syncTheme();
 observeReveals();
+spy();
+onScroll();
+syncProjects(false);
