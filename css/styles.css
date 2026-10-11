@@ -138,6 +138,7 @@ button,input{font:inherit;color:inherit}
 .eyebrow-item{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
 .eyebrow img,.eyebrow svg{flex-shrink:0}
 .eyebrow svg{color:var(--muted)}
+.eyebrow .eyebrow-code{color:var(--accent-ink)}
 .eyebrow-sep{width:4px;height:4px;border-radius:50%;background:var(--muted);opacity:.6}
 .hero h1{margin-bottom:18px}
 .bio{font-size:clamp(1.02rem,.96rem + .3vw,1.16rem);line-height:1.65;color:var(--text-2);max-width:54ch;margin:0}
