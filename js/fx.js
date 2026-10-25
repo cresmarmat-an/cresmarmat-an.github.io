@@ -1,132 +1,153 @@
-/* Motion layer: inertial smooth scrolling, a custom cursor (a dot plus a trailing ring
-   that grows over anything clickable), the hero text floating away as you scroll, 3D card
-   tilt with a moving glare, and magnetic buttons. Transform/opacity only; reduced motion
-   turns all of it off and the page behaves normally. */
+/* Small touches layered on top of main.js: cards that tilt toward the cursor with a shine
+   and an accent edge, buttons that lean toward the pointer, a nav that lifts once the page
+   scrolls, a "/" hint on the search box, a spoken result count for screen readers, and a
+   crossfade when the theme changes. Pointer effects are for mice and pens only, and
+   anything that moves is skipped when the visitor prefers reduced motion. */
+
 (() => {
-  const root = document.documentElement;
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const fine = matchMedia("(hover: hover) and (pointer: fine)").matches;
-  const lerp = (a, b, t) => a + (b - a) * t;
-  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const calmMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const finePointer = matchMedia("(hover: hover) and (pointer: fine)").matches;
+  const moving = finePointer && !calmMotion;
 
-  /* ---------- smooth scrolling ---------- */
+  /* ---------- nav: soft shadow once the page leaves the top ---------- */
 
-  if (window.Lenis) {
-    // anchors honour the CSS scroll-padding-top, so the sticky nav never covers a section heading
-    const lenis = new window.Lenis({ autoRaf: true, lerp: 0.085, wheelMultiplier: 0.95, anchors: true });
-    window.__lenis = lenis;
-    // "/" focuses search in main.js and scrolls it into view; keep Lenis in step with native jumps
-    addEventListener("hashchange", () => lenis.resize());
+  const nav = document.querySelector(".nav");
+  if (nav) {
+    const lift = () => nav.classList.toggle("scrolled", scrollY > 8);
+    addEventListener("scroll", lift, { passive: true });
+    lift();
   }
 
-  /* ---------- custom cursor (fine pointers) ---------- */
-
-  const cursor = document.querySelector(".cursor");
-  const dot = cursor && cursor.querySelector(".cursor-dot");
-  const ring = cursor && cursor.querySelector(".cursor-ring");
-  if (fine && cursor && dot && ring) {
-    root.classList.add("has-cursor");
-    const c = { x: -100, y: -100, rx: -100, ry: -100, seen: false };
-    let raf = 0;
-    const tick = () => {
-      raf = 0;
-      c.rx = lerp(c.rx, c.x, 0.2);
-      c.ry = lerp(c.ry, c.y, 0.2);
-      dot.style.transform = "translate3d(" + c.x + "px," + c.y + "px,0)";
-      ring.style.transform = "translate3d(" + c.rx.toFixed(1) + "px," + c.ry.toFixed(1) + "px,0)";
-      if (Math.abs(c.rx - c.x) > 0.2 || Math.abs(c.ry - c.y) > 0.2) raf = requestAnimationFrame(tick);
-    };
-    const kick = () => { if (!raf) raf = requestAnimationFrame(tick); };
-    addEventListener("pointermove", (e) => {
-      if (e.pointerType !== "mouse") return;
-      c.x = e.clientX; c.y = e.clientY;
-      if (!c.seen) { c.seen = true; c.rx = c.x; c.ry = c.y; cursor.classList.add("on"); }
-      const t = e.target;
-      const text = t.closest && t.closest("input, textarea, [contenteditable]");
-      const link = !text && t.closest && t.closest("a, button, label, [role=button], .proj-card");
-      cursor.classList.toggle("is-text", !!text);
-      cursor.classList.toggle("is-link", !!link);
-      kick();
-    }, { passive: true });
-    addEventListener("pointerdown", () => cursor.classList.add("is-down"), { passive: true });
-    addEventListener("pointerup", () => cursor.classList.remove("is-down"), { passive: true });
-    document.addEventListener("pointerout", (e) => { if (!e.relatedTarget) { cursor.classList.remove("on"); c.seen = false; } });
-    addEventListener("blur", () => { cursor.classList.remove("on"); c.seen = false; });
-  }
-
-  /* ---------- hero text floats up and dissolves as you scroll ---------- */
-
-  const hero = document.getElementById("home");
-  const heroText = hero && hero.querySelector(".hero-text");
-  if (heroText) {
-    let heroH = hero.offsetHeight, ticking = false, last = -1;
-    const update = () => {
-      ticking = false;
-      const sy = scrollY;
-      if (sy === last) return;
-      last = sy;
-      const p = clamp(sy / (heroH * 0.8), 0, 1);
-      const e = p * p * (3 - 2 * p);
-      heroText.style.translate = "0 " + (-e * 120).toFixed(1) + "px";
-      heroText.style.opacity = clamp(1 - e * 1.25, 0, 1).toFixed(3);
-    };
-    addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
-    addEventListener("resize", () => { heroH = hero.offsetHeight; last = -1; update(); }, { passive: true });
-    update();
-  }
-
-  /* ---------- 3D card tilt + glare (fine pointers) ---------- */
+  /* ---------- project cards: tilt, shine and edge follow the cursor ---------- */
 
   const grid = document.getElementById("projects-grid");
-  if (fine && grid) {
-    let active = null;
-    const release = (card) => {
-      card.classList.remove("tilting");
-      card.style.rotate = "";
-    };
-    grid.addEventListener("pointermove", (e) => {
-      const card = e.target.closest(".proj-card:not(.skeleton)");
-      if (card !== active) {
-        if (active) release(active);
-        active = card;
-        if (card) card.classList.add("tilting");
-      }
-      if (!card) return;
+  if (grid && moving) {
+    const MAX = 5; // degrees
+    let card = null, ev = null, frame = 0;
+
+    const paint = () => {
+      frame = 0;
+      if (!card || !ev) return;
       const r = card.getBoundingClientRect();
-      const nx = clamp((e.clientX - r.left) / r.width, 0, 1);
-      const ny = clamp((e.clientY - r.top) / r.height, 0, 1);
-      const ax = (0.5 - ny) * 14;
-      const ay = (nx - 0.5) * 16;
-      const ang = Math.hypot(ax, ay);
-      card.style.rotate = ang > 0.05 ? ax.toFixed(3) + " " + ay.toFixed(3) + " 0 " + ang.toFixed(2) + "deg" : "";
-      card.style.setProperty("--gx", (nx * 100).toFixed(1) + "%");
-      card.style.setProperty("--gy", (ny * 100).toFixed(1) + "%");
-      card.style.setProperty("--ga", ((Math.atan2(ny - 0.5, nx - 0.5) * 180) / Math.PI + 90).toFixed(1) + "deg");
+      const px = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1) - 0.5;
+      const py = Math.min(Math.max((ev.clientY - r.top) / r.height, 0), 1) - 0.5;
+      card.style.setProperty("--gx", ((px + 0.5) * 100).toFixed(1) + "%");
+      card.style.setProperty("--gy", ((py + 0.5) * 100).toFixed(1) + "%");
+      card.style.setProperty("--ga", (Math.atan2(px, -py) * 180 / Math.PI).toFixed(1) + "deg");
+      // the side under the cursor rises a little toward it
+      const ang = Math.min(Math.hypot(px, py) * 2, 1) * MAX;
+      card.style.rotate = ang < 0.05 ? "" : py.toFixed(3) + " " + (-px).toFixed(3) + " 0 " + ang.toFixed(2) + "deg";
+    };
+
+    const release = (c) => {
+      c.classList.remove("tilting");
+      c.style.rotate = "";
+    };
+
+    grid.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch") return;
+      const c = e.target.closest(".proj-card:not(.skeleton)");
+      if (c !== card) {
+        if (card) release(card);
+        card = c;
+        // wait for the entrance to finish so the tilt doesn't fight it
+        if (card && card.classList.contains("in")) card.classList.add("tilting");
+        else card = null;
+      }
+      ev = e;
+      if (card && !frame) frame = requestAnimationFrame(paint);
     });
     grid.addEventListener("pointerleave", () => {
-      if (active) release(active);
-      active = null;
+      if (card) release(card);
+      card = null;
     });
   }
 
-  /* ---------- magnetic buttons (fine pointers) ---------- */
+  /* ---------- buttons lean toward the pointer, then spring back ---------- */
 
-  if (fine) {
-    document.querySelectorAll(".btn, .icon-btn").forEach((el) => {
-      const pull = el.classList.contains("btn") ? 0.3 : 0.42;
-      el.addEventListener("pointermove", (e) => {
-        const r = el.getBoundingClientRect();
-        const dx = e.clientX - (r.left + r.width / 2);
-        const dy = e.clientY - (r.top + r.height / 2);
-        el.classList.add("mag");
-        el.classList.remove("mag-out");
-        el.style.translate = clamp(dx * pull, -12, 12).toFixed(1) + "px " + clamp(dy * pull, -10, 10).toFixed(1) + "px";
+  if (moving) {
+    const PULL = 0.22, LIMIT = 7;
+    document.querySelectorAll(".btn, .icon-btn").forEach((b) => {
+      let box = null;
+      b.addEventListener("pointerenter", (e) => {
+        if (e.pointerType === "touch") return;
+        const r = b.getBoundingClientRect();
+        box = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        b.classList.remove("mag-out");
+        b.classList.add("mag");
       });
-      el.addEventListener("pointerleave", () => {
-        el.classList.remove("mag");
-        el.classList.add("mag-out");
-        el.style.translate = "";
+      b.addEventListener("pointermove", (e) => {
+        if (!box) return;
+        const clamp = (v) => Math.max(-LIMIT, Math.min(LIMIT, v * PULL));
+        b.style.translate = clamp(e.clientX - box.x).toFixed(1) + "px " + clamp(e.clientY - box.y).toFixed(1) + "px";
+      });
+      b.addEventListener("pointerleave", () => {
+        if (!box) return;
+        box = null;
+        b.classList.replace("mag", "mag-out");
+        b.style.translate = "";
       });
     });
+    // the centre is measured on enter; a scroll mid-hover would leave it stale
+    addEventListener("scroll", () => {
+      document.querySelectorAll(".mag").forEach((b) => b.dispatchEvent(new PointerEvent("pointerleave")));
+    }, { passive: true });
+  }
+
+  /* ---------- search: "/" hint and a spoken result count ---------- */
+
+  const search = document.getElementById("search");
+  const clear = document.getElementById("search-clear");
+  if (search && clear) {
+    const kbd = document.createElement("kbd");
+    kbd.className = "search-kbd";
+    kbd.textContent = "/";
+    kbd.title = "Press / to search";
+    kbd.setAttribute("aria-hidden", "true");
+    clear.after(kbd);
+  }
+
+  if (grid && search) {
+    const live = document.createElement("p");
+    live.className = "sr-only";
+    live.setAttribute("aria-live", "polite");
+    grid.after(live);
+    let t;
+    const announce = (wait) => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        const n = grid.querySelectorAll(".proj-card:not(.skeleton):not([hidden])").length;
+        const q = search.value.trim();
+        live.textContent = !q ? n + (n === 1 ? " project" : " projects") + ", sorted by " + sortName()
+          : n ? n + (n === 1 ? " project matches" : " projects match") + " “" + q + "”"
+          : "No projects match “" + q + "”";
+      }, wait);
+    };
+    const sortName = () => {
+      const on = document.querySelector("input[name=sort]:checked");
+      const label = on && document.querySelector('label[for="' + on.id + '"]');
+      return label ? label.textContent.replace("–", " to ") : "recent";
+    };
+    search.addEventListener("input", () => announce(700));
+    document.getElementById("sort")?.addEventListener("change", () => announce(150));
+    clear.addEventListener("click", () => announce(150));
+    document.getElementById("empty-clear")?.addEventListener("click", () => announce(150));
+  }
+
+  /* ---------- theme: crossfade instead of a hard cut ---------- */
+
+  const themeBtn = document.getElementById("theme-toggle");
+  if (themeBtn && document.startViewTransition && !calmMotion) {
+    let passing = false;
+    // captured at the document so it runs before main.js's handler on the button,
+    // then the click is replayed inside the transition
+    document.addEventListener("click", (e) => {
+      if (passing || !themeBtn.contains(e.target)) return;
+      e.stopImmediatePropagation();
+      document.startViewTransition(() => {
+        passing = true;
+        try { themeBtn.click(); } finally { passing = false; }
+      });
+    }, true);
   }
 })();

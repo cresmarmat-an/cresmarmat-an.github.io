@@ -7,8 +7,8 @@
   <meta name="description" content="Cresmar Mat-an is a builder from the Philippines, publishing small open-source stuff. Projects sync live from GitHub." />
   <meta name="author" content="Cresmar Mat-an" />
   <link rel="canonical" href="https://cresmarmat-an.github.io/" />
-  <meta name="theme-color" content="#E6E5E2" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#262523" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#E0E5EC" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#22262F" media="(prefers-color-scheme: dark)" />
   <meta name="color-scheme" content="light dark" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://cresmarmat-an.github.io/" />
@@ -49,8 +49,7 @@
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
   <div id="progress" aria-hidden="true"></div>
-  <canvas id="morph" aria-hidden="true"></canvas>
-  <div class="cursor" aria-hidden="true"><i class="cursor-ring"></i><i class="cursor-dot"></i></div>
+  <canvas id="bg-canvas" aria-hidden="true"></canvas>
 
   <header class="nav">
     <div class="container nav-inner">
@@ -75,7 +74,7 @@
   <main id="main">
     <!-- HOME -->
     <section class="hero container" id="home" aria-labelledby="home-title">
-      <div class="hero-text">
+      <div class="hero-text" data-calm>
         <p class="eyebrow reveal">
           <span class="eyebrow-item"><svg class="eyebrow-code" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg>Software Developer</span>
           <span class="eyebrow-sep" aria-hidden="true"></span>
@@ -130,12 +129,9 @@
       </div>
     </section>
 
-    <!-- particle interlude: the portrait re-forms as a globe, then the Philippines -->
-    <div class="interlude" aria-hidden="true"><div class="interlude-stage"></div></div>
-
     <!-- PROJECTS -->
     <section class="section container" id="projects" aria-labelledby="projects-title">
-      <div class="section-head">
+      <div class="section-head" data-calm>
         <div class="section-copy reveal">
           <p class="section-tag">Projects</p>
           <p class="section-sub">This list is pulled live from my GitHub, so anything new I publish shows up here on its own.</p>
@@ -150,7 +146,7 @@
         </p>
       </div>
 
-      <div class="toolbar reveal">
+      <div class="toolbar reveal" data-calm>
         <label class="search">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>
           <span class="sr-only">Search projects</span>
@@ -201,8 +197,7 @@
     </div>
   </footer>
 
-  <script src="js/vendor/lenis.min.js" defer></script>
-  <script src="js/morph.js" defer></script>
+  <script src="js/particles.js" defer></script>
   <script src="js/main.js" defer></script>
   <script src="js/fx.js" defer></script>
 </body>
