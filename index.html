@@ -7,14 +7,14 @@
   <meta name="description" content="Cresmar Mat-an is a builder from the Philippines, publishing small open-source stuff. Projects sync live from GitHub." />
   <meta name="author" content="Cresmar Mat-an" />
   <link rel="canonical" href="https://cresmarmat-an.github.io/" />
-  <meta name="theme-color" content="#E0E5EC" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#22262F" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#E6E5E2" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#262523" media="(prefers-color-scheme: dark)" />
   <meta name="color-scheme" content="light dark" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://cresmarmat-an.github.io/" />
   <meta property="og:title" content="Cresmar Mat-an" />
   <meta property="og:description" content="Passionate about programming and building cool, useful stuff out of pure curiosity." />
-  <meta property="og:image" content="https://cresmarmat-an.github.io/assets/img/og.jpg" />
+  <meta property="og:image" content="https://cresmarmat-an.github.io/assets/img/og.jpg?v=20261025" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta name="twitter:card" content="summary_large_image" />
@@ -49,24 +49,8 @@
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
   <div id="progress" aria-hidden="true"></div>
-  <div class="dream-intro" aria-hidden="true"></div>
-  <div class="dream-bg" aria-hidden="true">
-    <canvas id="dream"></canvas>
-    <div class="orbs">
-      <div class="orb sphere far" data-x=".04" data-y=".14" data-depth=".35" style="--s:190px;--dur:11s"><i></i></div>
-      <div class="orb ring" data-x=".84" data-y=".55" data-depth=".7" style="--s:210px;--dur:13s"><i></i></div>
-      <div class="orb bubble" data-x=".46" data-y=".06" data-depth="1.1" style="--s:96px;--dur:9s"><i><b></b></i></div>
-      <div class="orb pill hide-sm" data-x=".02" data-y=".7" data-depth=".85" style="--s:150px;--h:64px;--dur:12s"><i></i></div>
-      <div class="orb sphere" data-x=".78" data-y=".18" data-depth="1.3" style="--s:54px;--dur:8s"><i></i></div>
-      <div class="orb ring hide-sm" data-x=".3" data-y=".86" data-depth=".5" style="--s:92px;--dur:10s"><i></i></div>
-      <div class="orb bubble farther" data-x=".88" data-y=".9" data-depth=".4" style="--s:150px;--dur:14s"><i><b></b></i></div>
-      <div class="orb sphere hide-sm" data-x=".62" data-y=".44" data-depth="1.5" style="--s:26px;--dur:7s"><i></i></div>
-      <div class="orb bubble" data-x=".18" data-y=".42" data-depth="1.2" style="--s:40px;--dur:8.5s"><i><b></b></i></div>
-    </div>
-    <div class="grain"></div>
-  </div>
-  <canvas id="bg-canvas" aria-hidden="true"></canvas>
-  <div class="cursor-glow" aria-hidden="true"></div>
+  <canvas id="morph" aria-hidden="true"></canvas>
+  <div class="cursor" aria-hidden="true"><i class="cursor-ring"></i><i class="cursor-dot"></i></div>
 
   <header class="nav">
     <div class="container nav-inner">
@@ -124,9 +108,6 @@
       </div>
 
       <div class="hero-photo reveal">
-        <i class="aura-halo" aria-hidden="true"></i>
-        <div class="orbit orbit-a" aria-hidden="true"><div class="orbit-plane"><i class="orbit-ring"></i><div class="orbit-spin"><i class="moon"></i></div></div></div>
-        <div class="orbit orbit-b" aria-hidden="true"><div class="orbit-plane"><i class="orbit-ring"></i><div class="orbit-spin"><i class="moon moon-sm"></i></div></div></div>
         <div class="photo-blend">
           <picture>
             <source srcset="assets/img/profile.webp?v=20261022" type="image/webp" />
@@ -148,6 +129,9 @@
         <span class="tech-chip"><img class="icon-mono" src="assets/img/icons/rust-original.svg" alt="" width="16" height="16" />Rust</span>
       </div>
     </section>
+
+    <!-- particle interlude: the portrait re-forms as a globe, then the Philippines -->
+    <div class="interlude" aria-hidden="true"><div class="interlude-stage"></div></div>
 
     <!-- PROJECTS -->
     <section class="section container" id="projects" aria-labelledby="projects-title">
@@ -217,8 +201,8 @@
     </div>
   </footer>
 
-  <script src="js/dream.js" defer></script>
-  <script src="js/particles.js" defer></script>
+  <script src="js/vendor/lenis.min.js" defer></script>
+  <script src="js/morph.js" defer></script>
   <script src="js/main.js" defer></script>
   <script src="js/fx.js" defer></script>
 </body>

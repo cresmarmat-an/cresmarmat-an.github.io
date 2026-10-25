@@ -564,7 +564,7 @@ function syncTheme() {
   // keep the browser UI colour in step with a forced theme
   themeMetas.forEach(({ m, content, media }) => {
     if (mode === "auto") { m.content = content; m.media = media; }
-    else { m.content = effective === "dark" ? "#22262F" : "#E0E5EC"; m.removeAttribute("media"); }
+    else { m.content = effective === "dark" ? "#262523" : "#E6E5E2"; m.removeAttribute("media"); }
   });
 }
 themeBtn.addEventListener("click", () => {

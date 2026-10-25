@@ -1,7 +1,7 @@
-/* Motion layer: floating neumorphic orbs with depth parallax, the hero dissolving upward as
-   you scroll, 3D card tilt with a moving glare, magnetic buttons and a soft cursor light.
-   One rAF loop drives it all with transform/opacity only, it idles when nothing moves,
-   and reduced motion turns it off (the CSS shows everything at rest). */
+/* Motion layer: inertial smooth scrolling, a custom cursor (a dot plus a trailing ring
+   that grows over anything clickable), the hero text floating away as you scroll, 3D card
+   tilt with a moving glare, and magnetic buttons. Transform/opacity only; reduced motion
+   turns all of it off and the page behaves normally. */
 (() => {
   const root = document.documentElement;
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -9,100 +9,80 @@
   const lerp = (a, b, t) => a + (b - a) * t;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-  /* ---------- state ---------- */
+  /* ---------- smooth scrolling ---------- */
 
-  let W = innerWidth, H = innerHeight;
-  const ptr = { x: 0, y: 0, tx: 0, ty: 0, gx: W / 2, gy: H / 2, tgx: W / 2, tgy: H / 2, seen: false };
+  if (window.Lenis) {
+    // anchors honour the CSS scroll-padding-top, so the sticky nav never covers a section heading
+    const lenis = new window.Lenis({ autoRaf: true, lerp: 0.085, wheelMultiplier: 0.95, anchors: true });
+    window.__lenis = lenis;
+    // "/" focuses search in main.js and scrolls it into view; keep Lenis in step with native jumps
+    addEventListener("hashchange", () => lenis.resize());
+  }
 
-  const orbs = [...document.querySelectorAll(".orb")].map((el) => ({
-    el, x: parseFloat(el.dataset.x) || 0, y: parseFloat(el.dataset.y) || 0, d: parseFloat(el.dataset.depth) || 0.5, size: 0,
-  }));
+  /* ---------- custom cursor (fine pointers) ---------- */
+
+  const cursor = document.querySelector(".cursor");
+  const dot = cursor && cursor.querySelector(".cursor-dot");
+  const ring = cursor && cursor.querySelector(".cursor-ring");
+  if (fine && cursor && dot && ring) {
+    root.classList.add("has-cursor");
+    const c = { x: -100, y: -100, rx: -100, ry: -100, seen: false };
+    let raf = 0;
+    const tick = () => {
+      raf = 0;
+      c.rx = lerp(c.rx, c.x, 0.2);
+      c.ry = lerp(c.ry, c.y, 0.2);
+      dot.style.transform = "translate3d(" + c.x + "px," + c.y + "px,0)";
+      ring.style.transform = "translate3d(" + c.rx.toFixed(1) + "px," + c.ry.toFixed(1) + "px,0)";
+      if (Math.abs(c.rx - c.x) > 0.2 || Math.abs(c.ry - c.y) > 0.2) raf = requestAnimationFrame(tick);
+    };
+    const kick = () => { if (!raf) raf = requestAnimationFrame(tick); };
+    addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "mouse") return;
+      c.x = e.clientX; c.y = e.clientY;
+      if (!c.seen) { c.seen = true; c.rx = c.x; c.ry = c.y; cursor.classList.add("on"); }
+      const t = e.target;
+      const text = t.closest && t.closest("input, textarea, [contenteditable]");
+      const link = !text && t.closest && t.closest("a, button, label, [role=button], .proj-card");
+      cursor.classList.toggle("is-text", !!text);
+      cursor.classList.toggle("is-link", !!link);
+      kick();
+    }, { passive: true });
+    addEventListener("pointerdown", () => cursor.classList.add("is-down"), { passive: true });
+    addEventListener("pointerup", () => cursor.classList.remove("is-down"), { passive: true });
+    document.addEventListener("pointerout", (e) => { if (!e.relatedTarget) { cursor.classList.remove("on"); c.seen = false; } });
+    addEventListener("blur", () => { cursor.classList.remove("on"); c.seen = false; });
+  }
+
+  /* ---------- hero text floats up and dissolves as you scroll ---------- */
+
   const hero = document.getElementById("home");
   const heroText = hero && hero.querySelector(".hero-text");
-  const heroPhoto = hero && hero.querySelector(".hero-photo");
-  const photoBlend = hero && hero.querySelector(".photo-blend");
-  const glow = document.querySelector(".cursor-glow");
-  let heroH = hero ? hero.offsetHeight : 1;
-
-  function measure() {
-    W = innerWidth; H = innerHeight;
-    orbs.forEach((o) => { o.size = o.el.offsetWidth || 120; });
-    heroH = hero ? hero.offsetHeight : 1;
-    dirty = true;
+  if (heroText) {
+    let heroH = hero.offsetHeight, ticking = false, last = -1;
+    const update = () => {
+      ticking = false;
+      const sy = scrollY;
+      if (sy === last) return;
+      last = sy;
+      const p = clamp(sy / (heroH * 0.8), 0, 1);
+      const e = p * p * (3 - 2 * p);
+      heroText.style.translate = "0 " + (-e * 120).toFixed(1) + "px";
+      heroText.style.opacity = clamp(1 - e * 1.25, 0, 1).toFixed(3);
+    };
+    addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
+    addEventListener("resize", () => { heroH = hero.offsetHeight; last = -1; update(); }, { passive: true });
+    update();
   }
-
-  /* ---------- input ---------- */
-
-  addEventListener("pointermove", (e) => {
-    if (e.pointerType === "touch") return; // fingers scroll; they don't steer the parallax
-    ptr.tx = (e.clientX / W) * 2 - 1;
-    ptr.ty = (e.clientY / H) * 2 - 1;
-    ptr.tgx = e.clientX;
-    ptr.tgy = e.clientY;
-    if (!ptr.seen && glow) { ptr.seen = true; ptr.gx = e.clientX; ptr.gy = e.clientY; glow.classList.add("on"); }
-    wake();
-  }, { passive: true });
-  const hideGlow = () => { if (glow) glow.classList.remove("on"); ptr.seen = false; ptr.tx = 0; ptr.ty = 0; wake(); };
-  document.addEventListener("pointerout", (e) => { if (!e.relatedTarget) hideGlow(); });
-  addEventListener("blur", hideGlow);
-  addEventListener("scroll", () => wake(), { passive: true });
-  addEventListener("resize", () => { measure(); wake(); }, { passive: true });
-
-  /* ---------- loop ---------- */
-
-  let raf = 0, dirty = true, lastScroll = -1;
-  function wake() { if (!raf && !document.hidden) raf = requestAnimationFrame(frame); }
-
-  function frame() {
-    raf = 0;
-    ptr.x = lerp(ptr.x, ptr.tx, 0.07);
-    ptr.y = lerp(ptr.y, ptr.ty, 0.07);
-    if (ptr.seen) { ptr.gx = lerp(ptr.gx, ptr.tgx, 0.16); ptr.gy = lerp(ptr.gy, ptr.tgy, 0.16); }
-    const sy = scrollY;
-    const moving = Math.abs(ptr.x - ptr.tx) > 0.0008 || Math.abs(ptr.y - ptr.ty) > 0.0008 ||
-      (ptr.seen && (Math.abs(ptr.gx - ptr.tgx) > 0.3 || Math.abs(ptr.gy - ptr.tgy) > 0.3));
-
-    if (moving || sy !== lastScroll || dirty) {
-      dirty = false;
-      lastScroll = sy;
-
-      // orbs drift past at their own depth and wrap around, so the dream never runs out
-      for (const o of orbs) {
-        const span = H + o.size * 2;
-        let y = (o.y * H - sy * o.d * 0.5) % span;
-        if (y < 0) y += span;
-        y -= o.size;
-        const x = o.x * W + ptr.x * 54 * o.d;
-        o.el.style.transform = "translate3d(" + x.toFixed(1) + "px," + (y + ptr.y * 40 * o.d).toFixed(1) + "px,0)";
-      }
-
-      // the hero floats up and dissolves as you scroll into the projects
-      if (heroText && heroPhoto) {
-        const p = clamp(sy / (heroH * 0.85), 0, 1);
-        const e = p * p * (3 - 2 * p);
-        heroText.style.translate = (ptr.x * 8).toFixed(1) + "px " + (-e * 120 + ptr.y * 6).toFixed(1) + "px";
-        heroText.style.opacity = clamp(1 - e * 1.2, 0, 1).toFixed(3);
-        heroPhoto.style.translate = (ptr.x * -18).toFixed(1) + "px " + (e * 90 + ptr.y * -12).toFixed(1) + "px";
-        heroPhoto.style.scale = (1 - e * 0.16).toFixed(4);
-        heroPhoto.style.rotate = (e * -10 + ptr.x * 2).toFixed(2) + "deg";
-        if (photoBlend) photoBlend.style.opacity = clamp(1 - e * 0.9, 0, 1).toFixed(3);
-      }
-
-      if (glow && ptr.seen) glow.style.transform = "translate3d(" + ptr.gx.toFixed(1) + "px," + ptr.gy.toFixed(1) + "px,0)";
-    }
-    if (moving) wake();
-  }
-
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { dirty = true; wake(); } });
 
   /* ---------- 3D card tilt + glare (fine pointers) ---------- */
 
   const grid = document.getElementById("projects-grid");
   if (fine && grid) {
     let active = null;
-    const release = (c) => {
-      c.classList.remove("tilting");
-      c.style.rotate = "";
+    const release = (card) => {
+      card.classList.remove("tilting");
+      card.style.rotate = "";
     };
     grid.addEventListener("pointermove", (e) => {
       const card = e.target.closest(".proj-card:not(.skeleton)");
@@ -115,8 +95,8 @@
       const r = card.getBoundingClientRect();
       const nx = clamp((e.clientX - r.left) / r.width, 0, 1);
       const ny = clamp((e.clientY - r.top) / r.height, 0, 1);
-      const ax = (0.5 - ny) * 16; // degrees around X
-      const ay = (nx - 0.5) * 18; // degrees around Y
+      const ax = (0.5 - ny) * 14;
+      const ay = (nx - 0.5) * 16;
       const ang = Math.hypot(ax, ay);
       card.style.rotate = ang > 0.05 ? ax.toFixed(3) + " " + ay.toFixed(3) + " 0 " + ang.toFixed(2) + "deg" : "";
       card.style.setProperty("--gx", (nx * 100).toFixed(1) + "%");
@@ -149,9 +129,4 @@
       });
     });
   }
-
-  measure();
-  wake();
-  // clear the intro mist once the page is painting smoothly
-  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add("awake")));
 })();
