@@ -585,9 +585,8 @@ themeBtn.addEventListener("click", () => {
 });
 darkMq.addEventListener("change", syncTheme);
 
-/* ---------- scroll: progress bar + spy, one rAF per frame ---------- */
+/* ---------- scroll: section spy, one rAF per frame ---------- */
 
-const progress = document.getElementById("progress");
 let ticking = false;
 function onScroll() {
   if (ticking) return;
@@ -595,10 +594,6 @@ function onScroll() {
   requestAnimationFrame(() => {
     ticking = false;
     spy();
-    if (progress && !calmMotion) {
-      const max = document.documentElement.scrollHeight - innerHeight;
-      progress.style.transform = "scaleX(" + (max > 0 ? Math.min(scrollY / max, 1).toFixed(4) : 0) + ")";
-    }
   });
 }
 addEventListener("scroll", onScroll, { passive: true });

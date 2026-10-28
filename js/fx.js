@@ -17,7 +17,6 @@
   let scrollDirty = true;
   let navScrolled = scrollY > 56;
   let navDirty = true;
-  let pointerOnNav = false;
   let scrollSpeed = 0;
   let scrollDirection = 0;
   let lastScrollY = scrollY;
@@ -73,8 +72,6 @@
     root.style.setProperty("--pointer-active", "0");
     root.style.removeProperty("--pointer-x");
     root.style.removeProperty("--pointer-y");
-    pointerOnNav = false;
-    navInner?.style.setProperty("--nav-glow", "0");
   }
 
   function paint() {
@@ -104,12 +101,6 @@
     root.style.setProperty("--pointer-x", point.x.toFixed(1) + "px");
     root.style.setProperty("--pointer-y", point.y.toFixed(1) + "px");
     root.style.setProperty("--pointer-active", "1");
-    if (navInner && pointerOnNav) {
-      const box = navInner.getBoundingClientRect();
-      navInner.style.setProperty("--nav-pointer-x", (point.x - box.left).toFixed(1) + "px");
-      navInner.style.setProperty("--nav-pointer-y", (point.y - box.top).toFixed(1) + "px");
-      navInner.style.setProperty("--nav-glow", "1");
-    } else navInner?.style.setProperty("--nav-glow", "0");
 
     if (card && card.isConnected && card.classList.contains("in")) {
       const box = card.getBoundingClientRect();
@@ -141,7 +132,6 @@
     if (event.pointerType === "touch" || !canMove()) return;
     point = { x: event.clientX, y: event.clientY };
     const target = event.target instanceof Element ? event.target : null;
-    pointerOnNav = !!target?.closest(".nav");
     const nextCard = target?.closest(".proj-card:not(.skeleton)") || null;
     if (nextCard !== card) {
       releaseCard();
