@@ -1,153 +1,298 @@
-/* Small touches layered on top of main.js: cards that tilt toward the cursor with a shine
-   and an accent edge, buttons that lean toward the pointer, a nav that lifts once the page
-   scrolls, a "/" hint on the search box, a spoken result count for screen readers, and a
-   crossfade when the theme changes. Pointer effects are for mice and pens only, and
-   anything that moves is skipped when the visitor prefers reduced motion. */
-
+/* Pointer-driven light, tactile controls, and accessible search feedback.
+   A single scheduled frame batches pointer writes; idle pages do no motion work. */
 (() => {
-  const calmMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const finePointer = matchMedia("(hover: hover) and (pointer: fine)").matches;
-  const moving = finePointer && !calmMotion;
-
-  /* ---------- nav: soft shadow once the page leaves the top ---------- */
-
+  const root = document.documentElement;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)");
+  const fine = matchMedia("(hover: hover) and (pointer: fine)");
   const nav = document.querySelector(".nav");
-  if (nav) {
-    const lift = () => nav.classList.toggle("scrolled", scrollY > 8);
-    addEventListener("scroll", lift, { passive: true });
-    lift();
-  }
-
-  /* ---------- project cards: tilt, shine and edge follow the cursor ---------- */
-
+  const navInner = nav?.querySelector(".nav-inner");
+  const navLinks = nav?.querySelector(".nav-links");
   const grid = document.getElementById("projects-grid");
-  if (grid && moving) {
-    const MAX = 5; // degrees
-    let card = null, ev = null, frame = 0;
+  root.classList.toggle("motion-paused", document.hidden);
+  let frame = 0;
+  let point = null;
+  let card = null;
+  let button = null;
+  let buttonBox = null;
+  let scrollDirty = true;
+  let navScrolled = scrollY > 56;
+  let navDirty = true;
+  let pointerOnNav = false;
+  let scrollSpeed = 0;
+  let scrollDirection = 0;
+  let lastScrollY = scrollY;
+  let lastScrollTime = performance.now();
+  let scrollTimer;
+  const impacts = new Map();
 
-    const paint = () => {
-      frame = 0;
-      if (!card || !ev) return;
-      const r = card.getBoundingClientRect();
-      const px = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1) - 0.5;
-      const py = Math.min(Math.max((ev.clientY - r.top) / r.height, 0), 1) - 0.5;
-      card.style.setProperty("--gx", ((px + 0.5) * 100).toFixed(1) + "%");
-      card.style.setProperty("--gy", ((py + 0.5) * 100).toFixed(1) + "%");
-      card.style.setProperty("--ga", (Math.atan2(px, -py) * 180 / Math.PI).toFixed(1) + "deg");
-      // the side under the cursor rises a little toward it
-      const ang = Math.min(Math.hypot(px, py) * 2, 1) * MAX;
-      card.style.rotate = ang < 0.05 ? "" : py.toFixed(3) + " " + (-px).toFixed(3) + " 0 " + ang.toFixed(2) + "deg";
-    };
+  const canMove = () => fine.matches && !reduce.matches && !document.hidden;
+  const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 
-    const release = (c) => {
-      c.classList.remove("tilting");
-      c.style.rotate = "";
-    };
+  // The track follows the existing active link, so scroll spy and keyboard
+  // navigation continue to own selection. Observe links only, never this track.
+  const navTrack = navLinks ? document.createElement("span") : null;
+  if (navTrack) {
+    navTrack.className = "nav-track";
+    navTrack.setAttribute("aria-hidden", "true");
+    navLinks.append(navTrack);
+    const changed = () => { navDirty = true; schedule(); };
+    const activeObserver = new MutationObserver(changed);
+    navLinks.querySelectorAll(".nav-link").forEach((link) => {
+      activeObserver.observe(link, { attributes: true, attributeFilter: ["class", "aria-current"] });
+    });
+    if ("ResizeObserver" in window) new ResizeObserver(changed).observe(navLinks);
+    navInner?.addEventListener("animationend", (event) => {
+      if (event.target === navInner && event.animationName === "dock-arrive") changed();
+    });
+    document.fonts?.ready.then(changed);
+  }
 
-    grid.addEventListener("pointermove", (e) => {
-      if (e.pointerType === "touch") return;
-      const c = e.target.closest(".proj-card:not(.skeleton)");
-      if (c !== card) {
-        if (card) release(card);
-        card = c;
-        // wait for the entrance to finish so the tilt doesn't fight it
-        if (card && card.classList.contains("in")) card.classList.add("tilting");
-        else card = null;
+  function releaseCard() {
+    if (!card) return;
+    card.classList.remove("tilting");
+    card.style.removeProperty("rotate");
+    card.style.removeProperty("--gx");
+    card.style.removeProperty("--gy");
+    card.style.removeProperty("--ga");
+    card = null;
+  }
+
+  function releaseButton() {
+    if (!button) return;
+    button.classList.remove("mag");
+    button.classList.add("mag-out");
+    button.style.removeProperty("translate");
+    button = null;
+    buttonBox = null;
+  }
+
+  function resetPointer() {
+    point = null;
+    releaseCard();
+    releaseButton();
+    root.style.setProperty("--pointer-active", "0");
+    root.style.removeProperty("--pointer-x");
+    root.style.removeProperty("--pointer-y");
+    pointerOnNav = false;
+    navInner?.style.setProperty("--nav-glow", "0");
+  }
+
+  function paint() {
+    frame = 0;
+    if (scrollDirty) {
+      // Keep the transition stable while momentum or touch scrolling settles
+      // near the top; the dock opens and closes at different thresholds.
+      if (scrollY > 56) navScrolled = true;
+      else if (scrollY < 16) navScrolled = false;
+      nav?.classList.toggle("scrolled", navScrolled);
+      root.style.setProperty("--scroll-speed", scrollSpeed.toFixed(3));
+      root.style.setProperty("--scroll-direction", String(scrollDirection));
+      scrollDirty = false;
+    }
+    if (navDirty && navTrack) {
+      const active = navLinks.querySelector(".nav-link.active") || navLinks.querySelector('.nav-link[aria-current="true"]');
+      if (active) {
+        // Layout offsets ignore the dock's entrance scale and translation.
+        navLinks.style.setProperty("--nav-x", active.offsetLeft.toFixed(2) + "px");
+        navLinks.style.setProperty("--nav-width", active.offsetWidth.toFixed(2) + "px");
+        navTrack.classList.add("ready");
       }
-      ev = e;
-      if (card && !frame) frame = requestAnimationFrame(paint);
-    });
-    grid.addEventListener("pointerleave", () => {
-      if (card) release(card);
-      card = null;
-    });
+      navDirty = false;
+    }
+    if (!point || !canMove()) return;
+
+    root.style.setProperty("--pointer-x", point.x.toFixed(1) + "px");
+    root.style.setProperty("--pointer-y", point.y.toFixed(1) + "px");
+    root.style.setProperty("--pointer-active", "1");
+    if (navInner && pointerOnNav) {
+      const box = navInner.getBoundingClientRect();
+      navInner.style.setProperty("--nav-pointer-x", (point.x - box.left).toFixed(1) + "px");
+      navInner.style.setProperty("--nav-pointer-y", (point.y - box.top).toFixed(1) + "px");
+      navInner.style.setProperty("--nav-glow", "1");
+    } else navInner?.style.setProperty("--nav-glow", "0");
+
+    if (card && card.isConnected && card.classList.contains("in")) {
+      const box = card.getBoundingClientRect();
+      if (box.width && box.height) {
+        const x = clamp((point.x - box.left) / box.width, 0, 1) - 0.5;
+        const y = clamp((point.y - box.top) / box.height, 0, 1) - 0.5;
+        card.classList.add("tilting");
+        card.style.setProperty("--gx", ((x + 0.5) * 100).toFixed(1) + "%");
+        card.style.setProperty("--gy", ((y + 0.5) * 100).toFixed(1) + "%");
+        card.style.setProperty("--ga", (Math.atan2(x, -y) * 180 / Math.PI).toFixed(1) + "deg");
+        const angle = Math.min(Math.hypot(x, y) * 2, 1) * 1.6;
+        card.style.rotate = angle < 0.05 ? "" : y.toFixed(3) + " " + (-x).toFixed(3) + " 0 " + angle.toFixed(2) + "deg";
+      }
+    }
+
+    if (button && buttonBox && button.isConnected) {
+      button.classList.remove("mag-out");
+      button.classList.add("mag");
+      button.style.translate = clamp((point.x - buttonBox.x) * 0.12, -2.5, 2.5).toFixed(1) + "px "
+        + clamp((point.y - buttonBox.y) * 0.12, -2.5, 2.5).toFixed(1) + "px";
+    }
   }
 
-  /* ---------- buttons lean toward the pointer, then spring back ---------- */
-
-  if (moving) {
-    const PULL = 0.22, LIMIT = 7;
-    document.querySelectorAll(".btn, .icon-btn").forEach((b) => {
-      let box = null;
-      b.addEventListener("pointerenter", (e) => {
-        if (e.pointerType === "touch") return;
-        const r = b.getBoundingClientRect();
-        box = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-        b.classList.remove("mag-out");
-        b.classList.add("mag");
-      });
-      b.addEventListener("pointermove", (e) => {
-        if (!box) return;
-        const clamp = (v) => Math.max(-LIMIT, Math.min(LIMIT, v * PULL));
-        b.style.translate = clamp(e.clientX - box.x).toFixed(1) + "px " + clamp(e.clientY - box.y).toFixed(1) + "px";
-      });
-      b.addEventListener("pointerleave", () => {
-        if (!box) return;
-        box = null;
-        b.classList.replace("mag", "mag-out");
-        b.style.translate = "";
-      });
-    });
-    // the centre is measured on enter; a scroll mid-hover would leave it stale
-    addEventListener("scroll", () => {
-      document.querySelectorAll(".mag").forEach((b) => b.dispatchEvent(new PointerEvent("pointerleave")));
-    }, { passive: true });
+  function schedule() {
+    if (!frame && !document.hidden) frame = requestAnimationFrame(paint);
   }
 
-  /* ---------- search: "/" hint and a spoken result count ---------- */
+  document.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "touch" || !canMove()) return;
+    point = { x: event.clientX, y: event.clientY };
+    const target = event.target instanceof Element ? event.target : null;
+    pointerOnNav = !!target?.closest(".nav");
+    const nextCard = target?.closest(".proj-card:not(.skeleton)") || null;
+    if (nextCard !== card) {
+      releaseCard();
+      card = nextCard;
+    }
+    const nextButton = target?.closest(".btn, .icon-btn") || null;
+    if (nextButton !== button) {
+      releaseButton();
+      button = nextButton;
+      if (button) {
+        const box = button.getBoundingClientRect();
+        buttonBox = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      }
+    }
+    schedule();
+  }, { passive: true });
 
+  addEventListener("scroll", () => {
+    // A scroll moves controls away from their cached pointer coordinates.
+    resetPointer();
+    const now = performance.now();
+    const distance = scrollY - lastScrollY;
+    const elapsed = clamp(now - lastScrollTime, 8, 64);
+    scrollSpeed = reduce.matches ? 0 : clamp(Math.abs(distance) / elapsed / 2.6, 0, 1);
+    scrollDirection = reduce.matches ? 0 : Math.sign(distance);
+    lastScrollY = scrollY;
+    lastScrollTime = now;
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      scrollSpeed = 0;
+      scrollDirection = 0;
+      scrollDirty = true;
+      schedule();
+    }, 180);
+    scrollDirty = true;
+    schedule();
+  }, { passive: true });
+  addEventListener("resize", () => {
+    resetPointer();
+    navDirty = true;
+    schedule();
+  }, { passive: true });
+  document.addEventListener("pointerout", (event) => {
+    if (!event.relatedTarget) resetPointer();
+  }, { passive: true });
+  document.addEventListener("pointercancel", resetPointer, { passive: true });
+  addEventListener("blur", resetPointer);
+
+  function environmentChanged() {
+    root.classList.toggle("motion-paused", document.hidden);
+    resetPointer();
+    impacts.forEach((cleanup) => cleanup());
+    clearTimeout(scrollTimer);
+    scrollSpeed = 0;
+    scrollDirection = 0;
+    root.style.setProperty("--scroll-speed", "0");
+    root.style.setProperty("--scroll-direction", "0");
+    lastScrollY = scrollY;
+    lastScrollTime = performance.now();
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+    if (!document.hidden) {
+      scrollDirty = true;
+      navDirty = true;
+      schedule();
+    }
+  }
+  reduce.addEventListener("change", environmentChanged);
+  fine.addEventListener("change", environmentChanged);
+  document.addEventListener("visibilitychange", environmentChanged);
+  addEventListener("pagehide", environmentChanged);
+  schedule();
+
+  // Decoration is added after the native click; navigation, focus, and button
+  // handlers remain untouched. Touch and keyboard activation get the same cue.
+  document.addEventListener("click", (event) => {
+    if (reduce.matches || document.hidden || !(event.target instanceof Element)) return;
+    const control = event.target.closest(".btn, .icon-btn, .nav-link")
+      || event.target.closest(".proj-card:not(.skeleton)");
+    if (!control || control.disabled) return;
+    const box = control.getBoundingClientRect();
+    if (!box.width || !box.height) return;
+    impacts.get(control)?.();
+    // Bound retained decorations even during rapid clicking across a long grid.
+    if (impacts.size >= 8) impacts.values().next().value();
+    const x = event.detail ? clamp(event.clientX - box.left, 0, box.width) : box.width / 2;
+    const y = event.detail ? clamp(event.clientY - box.top, 0, box.height) : box.height / 2;
+    const size = 2 * Math.hypot(Math.max(x, box.width - x), Math.max(y, box.height - y));
+    const ripple = document.createElement("span");
+    ripple.className = "control-ripple";
+    ripple.setAttribute("aria-hidden", "true");
+    ripple.style.setProperty("--ripple-x", x.toFixed(1) + "px");
+    ripple.style.setProperty("--ripple-y", y.toFixed(1) + "px");
+    ripple.style.setProperty("--ripple-size", size.toFixed(1) + "px");
+    let cleanupTimer;
+    const cleanup = () => {
+      clearTimeout(cleanupTimer);
+      ripple.remove();
+      control.classList.remove("impact");
+      impacts.delete(control);
+    };
+    impacts.set(control, cleanup);
+    ripple.addEventListener("animationend", cleanup, { once: true });
+    control.classList.add("impact");
+    control.append(ripple);
+    cleanupTimer = setTimeout(cleanup, 1400);
+  });
+
+  /* Search remains useful with keyboard navigation and screen readers. */
   const search = document.getElementById("search");
   const clear = document.getElementById("search-clear");
   if (search && clear) {
-    const kbd = document.createElement("kbd");
-    kbd.className = "search-kbd";
-    kbd.textContent = "/";
-    kbd.title = "Press / to search";
-    kbd.setAttribute("aria-hidden", "true");
-    clear.after(kbd);
+    const hint = document.createElement("kbd");
+    hint.className = "search-kbd";
+    hint.textContent = "/";
+    hint.title = "Press / to search";
+    hint.setAttribute("aria-hidden", "true");
+    clear.after(hint);
   }
 
   if (grid && search) {
     const live = document.createElement("p");
     live.className = "sr-only";
     live.setAttribute("aria-live", "polite");
+    live.setAttribute("aria-atomic", "true");
     grid.after(live);
-    let t;
-    const announce = (wait) => {
-      clearTimeout(t);
-      t = setTimeout(() => {
-        const n = grid.querySelectorAll(".proj-card:not(.skeleton):not([hidden])").length;
-        const q = search.value.trim();
-        live.textContent = !q ? n + (n === 1 ? " project" : " projects") + ", sorted by " + sortName()
-          : n ? n + (n === 1 ? " project matches" : " projects match") + " “" + q + "”"
-          : "No projects match “" + q + "”";
-      }, wait);
-    };
+    let announceTimer;
     const sortName = () => {
-      const on = document.querySelector("input[name=sort]:checked");
-      const label = on && document.querySelector('label[for="' + on.id + '"]');
+      const selected = document.querySelector("input[name=sort]:checked");
+      const label = selected && document.querySelector('label[for="' + selected.id + '"]');
       return label ? label.textContent.replace("–", " to ") : "recent";
     };
+    const announce = (wait) => {
+      clearTimeout(announceTimer);
+      announceTimer = setTimeout(() => {
+        if (grid.getAttribute("aria-busy") === "true") return;
+        const count = grid.querySelectorAll(".proj-card:not(.skeleton):not([hidden])").length;
+        const query = search.value.trim();
+        live.textContent = !query
+          ? count + (count === 1 ? " project" : " projects") + ", sorted by " + sortName()
+          : count
+            ? count + (count === 1 ? " project matches" : " projects match") + " “" + query + "”"
+            : "No projects match “" + query + "”";
+      }, wait);
+    };
     search.addEventListener("input", () => announce(700));
+    search.addEventListener("keydown", (event) => { if (event.key === "Escape") announce(150); });
     document.getElementById("sort")?.addEventListener("change", () => announce(150));
-    clear.addEventListener("click", () => announce(150));
+    clear?.addEventListener("click", () => announce(150));
     document.getElementById("empty-clear")?.addEventListener("click", () => announce(150));
-  }
-
-  /* ---------- theme: crossfade instead of a hard cut ---------- */
-
-  const themeBtn = document.getElementById("theme-toggle");
-  if (themeBtn && document.startViewTransition && !calmMotion) {
-    let passing = false;
-    // captured at the document so it runs before main.js's handler on the button,
-    // then the click is replayed inside the transition
-    document.addEventListener("click", (e) => {
-      if (passing || !themeBtn.contains(e.target)) return;
-      e.stopImmediatePropagation();
-      document.startViewTransition(() => {
-        passing = true;
-        try { themeBtn.click(); } finally { passing = false; }
-      });
-    }, true);
+    new MutationObserver(() => announce(200)).observe(grid, { childList: true });
+    announce(200);
   }
 })();

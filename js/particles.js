@@ -1,441 +1,476 @@
-/* Reactive node field behind the page: drifting dots, webbed links, cursor push,
-   press-and-hold pull, click shockwaves.
-
-   Built to be exact rather than approximate:
-   - every node is moved first and drawn second, so links and cursor lines always
-     end precisely on their dots (no one-frame lag between a dot and its lines)
-   - neighbours come from a uniform grid: true distances, every pair checked once
-   - physics is delta-timed to 60fps, so 60Hz, 120Hz and 144Hz screens behave the same
-   - pointer speed is measured against event timestamps, so a 1000Hz mouse and a
-     60Hz trackpad push the field equally hard, and it decays to zero when you stop
-   - the canvas matches its real on-screen box at the device's pixel ratio (up to 2x),
-     and resizing keeps every node where it was instead of reseeding the field
-   - a lifted finger or a cursor leaving the window releases the field right away,
-     so there are no leftover links to a stale position
-   - colours follow the site's theme toggle as well as the OS setting */
+/* A living coordinate field: scroll moves the grid through depth, the pointer bends
+   nearby lines, and small signals travel along its circuits. All decoration is
+   painted into one transparent canvas; the page keeps its native interactions. */
 (() => {
   const canvas = document.getElementById("bg-canvas");
-  if (!canvas || !canvas.getContext) return;
+  if (!canvas) return;
   const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
   const root = document.documentElement;
-  const reduceMq = matchMedia("(prefers-reduced-motion: reduce)");
-  const darkMq = matchMedia("(prefers-color-scheme: dark)");
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+  const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+  const finePointer = matchMedia("(hover: hover) and (pointer: fine)");
+  const CELL = 64;
+  const FRAME = 1000 / 60;
+  const TAU = Math.PI * 2;
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, strength: 0, active: false };
+  const rings = [];
+  let width = 0, height = 0, pixelRatio = 1;
+  let scrollTarget = window.scrollY || 0, scrollPosition = scrollTarget;
+  let frameId = 0, previousTime = 0, lastDrawTime = 0, elapsed = 0;
+  let gridRGB = "126, 119, 106", accentRGB = "189, 65, 41", dark = false;
+  let secondaryRGB = "150, 94, 190", tertiaryRGB = "112, 141, 55";
+  const iconSources = [...document.querySelectorAll(".tech-stack .tech-chip img")];
+  const icons = [];
+  const popups = [];
+  let iconBag = [], nextPopupAt = 0.25, lastIcon = -1;
 
-  const THEMES = {
-    light: { dots: ["#2563EB", "#7C3AED", "#0891B2", "#3B82F6", "#8B5CF6", "#0EA5E9"], link: "59,91,160", linkA: 0.36, grab: "37,99,235", grabA: 0.5, ring: "37,99,235", ring2: "124,58,237" },
-    dark: { dots: ["#60A5FA", "#A78BFA", "#22D3EE", "#93C5FD", "#C4B5FD", "#38BDF8"], link: "148,180,255", linkA: 0.3, grab: "147,197,253", grabA: 0.45, ring: "147,197,253", ring2: "167,139,250" },
-  };
-  const isDark = () => {
-    const t = root.dataset.theme;
-    return t === "dark" || (t !== "light" && darkMq.matches);
-  };
-  let theme = THEMES[isDark() ? "dark" : "light"];
-
-  const MARGIN = 24;     // nodes wrap this far outside the edges so they never pop in
-  const CRUISE = 0.36;   // natural drift, px per 60fps frame
-  const MAX_SPEED = 4;
-  const LEVELS = 12;     // link opacities are batched into this many paths per frame
-
-  let W = 0, H = 0, dpr = 1, small = false;
-  let linkDist = 130, grabDist = 190;
-  let nodes = [], sparks = [], waves = [];
-  let simT = 0;
-  const pointer = { x: 0, y: 0, vx: 0, vy: 0, t: 0, active: false, down: false, type: "mouse" };
-
-  /* ---------- nodes ---------- */
-
-  function makeNode(x, y, fadeIn) {
-    const ang = Math.random() * Math.PI * 2;
-    const sp = CRUISE * (0.35 + Math.random() * 0.9);
-    const bvx = Math.cos(ang) * sp, bvy = Math.sin(ang) * sp;
-    return {
-      x, y, vx: bvx, vy: bvy, bvx, bvy,
-      r: 0.9 + Math.random() * 1.6,
-      c: (Math.random() * 6) | 0,
-      tw: Math.random() * Math.PI * 2,
-      ts: 0.02 + Math.random() * 0.035,
-      a: fadeIn ? 0 : 1,
-    };
+  // A seeded field stays in place through resize and theme changes.
+  function noise(n) {
+    const value = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+    return value - Math.floor(value);
   }
+  const stars = Array.from({ length: 44 }, (_, i) => ({
+    x: noise(i + 1), y: noise(i + 61), depth: 0.3 + noise(i + 121) * 0.7,
+    phase: noise(i + 181) * TAU,
+  }));
+  const signals = Array.from({ length: 14 }, (_, i) => ({
+    x: noise(i + 241), y: noise(i + 301),
+    phase: noise(i + 361), speed: 25 + noise(i + 421) * 30,
+    horizontal: i % 2 === 0,
+  }));
 
-  function targetCount() {
-    const per = small ? 8500 : 7000;
-    return Math.max(24, Math.min(small ? 80 : 190, Math.round((W * H) / per)));
-  }
+  const rgba = (rgb, alpha) => "rgba(" + rgb + "," + alpha + ")";
+  const wrap = (value, limit) => ((value % limit) + limit) % limit;
+  const smoothstep = (value) => { const t = Math.max(0, Math.min(value, 1)); return t * t * (3 - 2 * t); };
+  const channelColor = (index) => [accentRGB, secondaryRGB, tertiaryRGB][index % 3];
 
-  // add or remove nodes to match the viewport's area; existing nodes stay put
-  function fitCount(fadeIn) {
-    const want = targetCount();
-    while (nodes.length < want) nodes.push(makeNode(Math.random() * W, Math.random() * H, fadeIn));
-    if (nodes.length > want) nodes.length = want;
+  function readColors() {
+    const style = getComputedStyle(root);
+    dark = root.dataset.theme === "dark" ||
+      (root.dataset.theme !== "light" && darkScheme.matches);
+    gridRGB = style.getPropertyValue("--grid-rgb").trim() || (dark ? "150, 146, 135" : "126, 119, 106");
+    accentRGB = style.getPropertyValue("--accent-rgb").trim() || (dark ? "250, 128, 102" : "189, 65, 41");
+    secondaryRGB = style.getPropertyValue("--secondary-rgb").trim() || (dark ? "190, 142, 228" : "150, 94, 190");
+    tertiaryRGB = style.getPropertyValue("--tertiary-rgb").trim() || (dark ? "160, 194, 95" : "112, 141, 55");
+    if (!isRunning()) draw();
   }
 
   function resize() {
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    if (!w || !h) return;
-    const nextDpr = Math.min(window.devicePixelRatio || 1, 2);
-    if (w === W && h === H && nextDpr === dpr) return;
+    const bounds = canvas.getBoundingClientRect();
+    width = Math.max(1, bounds.width);
+    height = Math.max(1, bounds.height);
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 1.75);
+    canvas.width = Math.round(width * pixelRatio);
+    canvas.height = Math.round(height * pixelRatio);
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    popups.length = 0;
+    nextPopupAt = elapsed + 0.2;
+    draw();
+  }
 
-    // width changed (window resize, rotation): scale positions so the field keeps its shape.
-    // height-only changes (mobile toolbars sliding) leave nodes exactly where they are.
-    if (W && H && w !== W) {
-      const sx = w / W, sy = h / H;
-      for (const n of nodes) { n.x *= sx; n.y *= sy; }
+  // Cache original SVG colors; only explicitly monochrome marks get a white
+  // dark-theme variant. Colored technology logos never pass through a filter.
+  function spriteFor(image, invert = false) {
+    const sprite = document.createElement("canvas");
+    sprite.width = sprite.height = 96;
+    const surface = sprite.getContext("2d");
+    if (!surface) return image;
+    if (invert) surface.filter = "invert(1)";
+    const scale = Math.min(88 / image.naturalWidth, 88 / image.naturalHeight);
+    const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+    surface.drawImage(image, (96 - w) / 2, (96 - h) / 2, w, h);
+    return sprite;
+  }
+
+  iconSources.forEach((source) => {
+    const image = new Image();
+    const entry = { ready: false, sprite: null, darkSprite: null, mono: source.classList.contains("icon-mono") };
+    icons.push(entry);
+    image.decoding = "async";
+    image.onload = () => {
+      entry.sprite = spriteFor(image);
+      entry.darkSprite = entry.mono ? spriteFor(image, true) : entry.sprite;
+      entry.ready = true;
+    };
+    image.src = source.currentSrc || source.src;
+  });
+
+  function nextIcon() {
+    if (!iconBag.length) {
+      iconBag = icons.map((icon, index) => icon.ready ? index : -1).filter((index) => index >= 0);
+      for (let i = iconBag.length - 1; i > 0; i--) {
+        const other = Math.floor(Math.random() * (i + 1));
+        [iconBag[i], iconBag[other]] = [iconBag[other], iconBag[i]];
+      }
+      if (iconBag.length > 1 && iconBag[iconBag.length - 1] === lastIcon) {
+        [iconBag[0], iconBag[iconBag.length - 1]] = [iconBag[iconBag.length - 1], iconBag[0]];
+      }
     }
-    W = w; H = h; dpr = nextDpr;
-    canvas.width = Math.round(W * dpr);
-    canvas.height = Math.round(H * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    small = Math.min(W, H) < 600;
-    linkDist = small ? 108 : 132;
-    grabDist = small ? 150 : 200;
-    fitCount(!reduceMq.matches);
-    if (!running()) draw(false);
+    if (!iconBag.length) return -1;
+    lastIcon = iconBag.pop();
+    return lastIcon;
   }
 
-  /* ---------- neighbour grid ---------- */
+  function spawnPopup() {
+    const index = nextIcon();
+    if (index < 0) return;
+    // Layout is read only when an icon spawns, not during the animation loop.
+    const obstacles = [...document.querySelectorAll(".hero-text > *, .section-copy, .toolbar, .proj-card:not([hidden]), .sync, .portrait-stage, .nav, .footer")]
+      .map((element) => element.getBoundingClientRect())
+      .filter((box) => box.width > 0 && box.height > 0 && box.bottom > 0 && box.top < height);
+    const offsetX = wrap(-scrollPosition * 0.025, CELL);
+    const offsetY = wrap(-scrollPosition * 0.18, CELL);
+    let best = null, bestScore = -Infinity;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const x = Math.floor((40 + Math.random() * Math.max(1, width - 80) - offsetX) / CELL) * CELL + offsetX + CELL / 2;
+      const y = Math.floor((112 + Math.random() * Math.max(1, height - 152) - offsetY) / CELL) * CELL + offsetY + CELL / 2;
+      if (x < 40 || x > width - 40 || y < 100 || y > height - 40) continue;
+      const column = Math.round((x - CELL / 2 + scrollPosition * 0.025) / CELL);
+      const row = Math.round((y - CELL / 2 + scrollPosition * 0.18) / CELL);
+      if (popups.some((popup) => popup.column === column && popup.row === row)) continue;
+      const blocked = obstacles.some((box) => x > box.left - 30 && x < box.right + 30 && y > box.top - 30 && y < box.bottom + 30);
+      const distance = popups.length ? Math.min(...popups.map((popup) => Math.hypot(x - (popup.x - scrollPosition * 0.025), y - (popup.y - scrollPosition * 0.18)))) : 220;
+      const score = (blocked ? 0 : 1000) + Math.min(distance, 350) + Math.random() * 70;
+      if (score > bestScore) { bestScore = score; best = { x, y, column, row, blocked }; }
+    }
+    if (!best) return;
+    popups.push({
+      icon: index, column: best.column, row: best.row,
+      x: best.column * CELL + CELL / 2, y: best.row * CELL + CELL / 2,
+      started: elapsed, duration: 5.6 + Math.random() * 2.8,
+      size: (width < 700 ? 29 : 31) + Math.random() * 3,
+      opacity: best.blocked ? 0.19 : (dark ? 0.8 : 0.73),
+    });
+  }
 
-  let head = new Int32Array(0), next = new Int32Array(0), cols = 0, rows = 0;
-  const linkSegs = Array.from({ length: LEVELS }, () => []);
-  const grabSegs = Array.from({ length: LEVELS }, () => []);
-
-  function buildGrid() {
-    const cell = linkDist;
-    cols = Math.max(1, Math.ceil((W + MARGIN * 2) / cell));
-    rows = Math.max(1, Math.ceil((H + MARGIN * 2) / cell));
-    const size = cols * rows;
-    if (head.length < size) head = new Int32Array(size);
-    head.fill(-1, 0, size);
-    if (next.length < nodes.length) next = new Int32Array(nodes.length + 64);
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      const cx = Math.min(cols - 1, Math.max(0, ((n.x + MARGIN) / cell) | 0));
-      const cy = Math.min(rows - 1, Math.max(0, ((n.y + MARGIN) / cell) | 0));
-      const k = cy * cols + cx;
-      next[i] = head[k];
-      head[k] = i;
+  function updatePopups() {
+    for (let i = popups.length - 1; i >= 0; i--) {
+      const popup = popups[i], y = popup.y - scrollPosition * 0.18;
+      if (elapsed - popup.started > popup.duration || y < -64 || y > height + 64) popups.splice(i, 1);
+    }
+    const limit = width < 700 ? 2 : width < 1100 ? 3 : 5;
+    if (popups.length > limit) popups.splice(0, popups.length - limit);
+    if (popups.length < limit && elapsed >= nextPopupAt) {
+      spawnPopup();
+      nextPopupAt = elapsed + 0.6 + Math.random() * 0.45;
     }
   }
 
-  /* ---------- readability: the field quiets down behind text marked data-calm ---------- */
+  function drawPopups() {
+    popups.forEach((popup) => {
+      const age = elapsed - popup.started;
+      const incoming = smoothstep(age / 1);
+      const outgoing = smoothstep((popup.duration - age) / 1.4);
+      const fade = Math.min(incoming, outgoing);
+      const scale = 0.86 + incoming * 0.14;
+      const size = popup.size * scale;
+      const x = popup.column * CELL - scrollPosition * 0.025;
+      const y = popup.row * CELL - scrollPosition * 0.18;
+      const centerX = x + CELL / 2, centerY = y + CELL / 2;
+      const p = bend(centerX, centerY);
+      const hover = pointer.strength * Math.max(0, 1 - Math.hypot(centerX - pointer.x, centerY - pointer.y) / 180);
+      const color = channelColor(popup.icon);
+      ctx.save();
+      ctx.globalAlpha = fade * (popup.opacity + hover * 0.1);
+      // The eight samples use the grid's same corners and midpoints. The whole
+      // 64px cell bends with the field while its icon remains safely in the middle.
+      ctx.beginPath();
+      point(x, y, true); point(x + CELL / 2, y, false); point(x + CELL, y, false);
+      point(x + CELL, y + CELL / 2, false); point(x + CELL, y + CELL, false);
+      point(x + CELL / 2, y + CELL, false); point(x, y + CELL, false);
+      point(x, y + CELL / 2, false); ctx.closePath();
+      ctx.fillStyle = rgba(color, 0.07 + hover * 0.06);
+      ctx.fill();
+      ctx.strokeStyle = rgba(color, 0.3 + hover * 0.24);
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+      const glyph = icons[popup.icon];
+      ctx.drawImage(dark ? glyph.darkSprite : glyph.sprite, p[0] - size / 2, p[1] - size / 2, size, size);
+      const topLeft = bend(x + 1, y + 1), bottomRight = bend(x + CELL - 1, y + CELL - 1);
+      ctx.strokeStyle = rgba(color, 0.65 + hover * 0.2);
+      ctx.beginPath();
+      ctx.moveTo(topLeft[0] + 7, topLeft[1]); ctx.lineTo(topLeft[0], topLeft[1]); ctx.lineTo(topLeft[0], topLeft[1] + 7);
+      ctx.moveTo(bottomRight[0] - 7, bottomRight[1]); ctx.lineTo(bottomRight[0], bottomRight[1]); ctx.lineTo(bottomRight[0], bottomRight[1] - 7);
+      ctx.stroke();
+      ctx.restore();
+    });
+  }
 
-  const calmEls = [...document.querySelectorAll("[data-calm]")];
-  let zones = [];
-  function updateZones() {
-    zones = [];
-    for (const el of calmEls) {
-      const r = el.getBoundingClientRect();
-      if (r.bottom < -40 || r.top > H + 40 || !r.width) continue;
-      zones.push([r.left - 24, r.top - 18, r.right + 24, r.bottom + 18]);
+  function drawLightSweeps() {
+    const x = wrap(elapsed * 24 + width * 0.4, width + 1000) - 500;
+    const sweep = ctx.createLinearGradient(x - 240, 0, x + 240, height * 0.55);
+    sweep.addColorStop(0, rgba(accentRGB, 0));
+    sweep.addColorStop(0.4, rgba(accentRGB, dark ? 0.018 : 0.012));
+    sweep.addColorStop(0.5, rgba(accentRGB, dark ? 0.055 : 0.028));
+    sweep.addColorStop(0.6, rgba(accentRGB, dark ? 0.018 : 0.012));
+    sweep.addColorStop(1, rgba(accentRGB, 0));
+    ctx.fillStyle = sweep;
+    ctx.fillRect(0, 0, width, height);
+    const haloX = width * (0.66 + Math.sin(elapsed * 0.085) * 0.2);
+    const haloY = height * (0.45 + Math.cos(elapsed * 0.11) * 0.28);
+    const halo = ctx.createRadialGradient(haloX, haloY, 0, haloX, haloY, Math.min(width, 850));
+    halo.addColorStop(0, rgba(secondaryRGB, dark ? 0.04 : 0.022));
+    halo.addColorStop(0.6, rgba(tertiaryRGB, dark ? 0.014 : 0.008));
+    halo.addColorStop(1, rgba(secondaryRGB, 0));
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  function drawDepth() {
+    const depthCell = CELL * 2;
+    const offsetX = wrap(-scrollPosition * 0.012, depthCell);
+    const offsetY = wrap(-scrollPosition * 0.075, depthCell);
+    ctx.strokeStyle = rgba(gridRGB, dark ? 0.25 : 0.18);
+    ctx.lineWidth = 0.85;
+    ctx.setLineDash([1, 10]);
+    ctx.lineDashOffset = -elapsed * 9;
+    ctx.beginPath();
+    for (let x = offsetX; x < width; x += depthCell) {
+      ctx.moveTo(x, 0); ctx.lineTo(x, height);
     }
-  }
-  // 1 in open space, fading to a whisper inside a text block, with a soft 70px edge
-  function calm(x, y) {
-    let f = 1;
-    for (const z of zones) {
-      const dx = Math.max(z[0] - x, 0, x - z[2]);
-      const dy = Math.max(z[1] - y, 0, y - z[3]);
-      f = Math.min(f, 0.16 + 0.84 * Math.min(1, Math.hypot(dx, dy) / 70));
+    for (let y = offsetY; y < height; y += depthCell * 2) {
+      ctx.moveTo(0, y); ctx.lineTo(width, y);
     }
-    return f;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineDashOffset = 0;
   }
 
-  function pair(a, b, L2) {
-    const dx = a.x - b.x, dy = a.y - b.y;
-    const d2 = dx * dx + dy * dy;
-    if (d2 >= L2) return;
-    let strength = (1 - Math.sqrt(d2) / linkDist) * Math.min(a.a, b.a);
-    if (zones.length) strength *= calm((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-    if (strength <= 0.01) return;
-    linkSegs[Math.min(LEVELS - 1, (strength * LEVELS) | 0)].push(a.x, a.y, b.x, b.y);
+  // Displace samples radially for a soft local lens around the pointer.
+  function bend(x, y) {
+    if (pointer.strength < 0.002 || reduced.matches) return [x, y];
+    const dx = x - pointer.x, dy = y - pointer.y;
+    const distance = dx * dx + dy * dy;
+    const influence = Math.exp(-distance / 22000) * 0.115 * pointer.strength;
+    return [x + dx * influence, y + dy * influence];
   }
 
-  // each pair once: same cell (later entries only) plus the four "forward" cells
-  function collectLinks() {
-    for (const s of linkSegs) s.length = 0;
-    const L2 = linkDist * linkDist;
-    for (let cy = 0; cy < rows; cy++) {
-      for (let cx = 0; cx < cols; cx++) {
-        for (let i = head[cy * cols + cx]; i !== -1; i = next[i]) {
-          const a = nodes[i];
-          for (let j = next[i]; j !== -1; j = next[j]) pair(a, nodes[j], L2);
-          if (cx + 1 < cols) for (let j = head[cy * cols + cx + 1]; j !== -1; j = next[j]) pair(a, nodes[j], L2);
-          if (cy + 1 < rows) {
-            const r = (cy + 1) * cols;
-            if (cx > 0) for (let j = head[r + cx - 1]; j !== -1; j = next[j]) pair(a, nodes[j], L2);
-            for (let j = head[r + cx]; j !== -1; j = next[j]) pair(a, nodes[j], L2);
-            if (cx + 1 < cols) for (let j = head[r + cx + 1]; j !== -1; j = next[j]) pair(a, nodes[j], L2);
-          }
-        }
+  function point(x, y, first) {
+    const p = bend(x, y);
+    if (first) ctx.moveTo(p[0], p[1]);
+    else ctx.lineTo(p[0], p[1]);
+  }
+
+  function drawGrid(offsetX, offsetY) {
+    ctx.lineWidth = 0.65;
+    ctx.strokeStyle = rgba(gridRGB, dark ? 0.18 : 0.15);
+    ctx.beginPath();
+    for (let x = offsetX - CELL; x < width + CELL; x += CELL) {
+      for (let y = offsetY - CELL; y < height + CELL + 32; y += 32) point(x, y, y === offsetY - CELL);
+    }
+    for (let y = offsetY - CELL; y < height + CELL; y += CELL) {
+      for (let x = offsetX - CELL; x < width + CELL + 32; x += 32) point(x, y, x === offsetX - CELL);
+    }
+    ctx.stroke();
+
+    // Sparse registration marks anchor the field without making every cell busy.
+    ctx.strokeStyle = rgba(gridRGB, dark ? 0.32 : 0.27);
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    const markX = wrap(-scrollPosition * 0.025, CELL * 4);
+    const markY = wrap(-scrollPosition * 0.18, CELL * 4);
+    for (let x = markX - CELL * 4; x < width + CELL; x += CELL * 4) {
+      for (let y = markY - CELL * 4; y < height + CELL; y += CELL * 4) {
+        const p = bend(x, y);
+        ctx.moveTo(p[0] - 3, p[1]); ctx.lineTo(p[0] + 3, p[1]);
+        ctx.moveTo(p[0], p[1] - 3); ctx.lineTo(p[0], p[1] + 3);
+      }
+    }
+    ctx.stroke();
+  }
+
+  function drawStars(moving) {
+    stars.forEach((star) => {
+      const x = wrap(star.x * width + (moving ? elapsed * star.depth * 0.7 : 0), width);
+      const y = wrap(star.y * height - scrollPosition * star.depth * 0.06, height);
+      const pulse = moving ? Math.sin(elapsed * 0.55 + star.phase) * 0.07 : 0;
+      ctx.fillStyle = rgba(gridRGB, 0.18 + star.depth * 0.15 + pulse);
+      ctx.beginPath();
+      ctx.arc(x, y, star.depth > 0.85 ? 1 : 0.65, 0, TAU);
+      ctx.fill();
+    });
+  }
+
+  function drawSignals() {
+    const columns = Math.ceil(width / CELL), rows = Math.ceil(height / CELL);
+    signals.forEach((signal, i) => {
+      if (width < 700 && i > 7) return;
+      const pathLength = CELL * (4 + i % 3);
+      const color = channelColor(i);
+      const head = wrap(elapsed * signal.speed + signal.phase * pathLength * 1.8, pathLength * 1.8);
+      if (head > pathLength + 45) return;
+      const x = wrap(Math.floor(signal.x * columns) * CELL - scrollPosition * 0.025 + CELL, (columns + 2) * CELL) - CELL;
+      const y = wrap(Math.floor(signal.y * rows) * CELL - scrollPosition * 0.18 + CELL, (rows + 2) * CELL) - CELL;
+      // A single elbow routes each signal through the coordinate field.
+      const routePoint = (distance) => {
+        const first = Math.min(distance, CELL * 2);
+        const second = Math.max(0, distance - CELL * 2);
+        return signal.horizontal ? [x + first, y + second] : [x + second, y + first];
+      };
+      for (let trail = 0; trail < 10; trail++) {
+        const distance = head - trail * 6;
+        if (distance < 0 || distance > pathLength) continue;
+        const a = routePoint(Math.max(0, distance - 6));
+        const b = routePoint(distance);
+        ctx.strokeStyle = rgba(color, (1 - trail / 10) * (dark ? 0.48 : 0.32));
+        ctx.lineWidth = trail === 0 ? 1.5 : 1;
+        ctx.beginPath(); point(a[0], a[1], true); point(b[0], b[1], false); ctx.stroke();
+      }
+      if (head <= pathLength) {
+        const p = routePoint(head), b = bend(p[0], p[1]);
+        ctx.fillStyle = rgba(color, dark ? 0.7 : 0.55);
+        ctx.fillRect(b[0] - 1.25, b[1] - 1.25, 2.5, 2.5);
+      }
+    });
+  }
+
+  function drawPointer(offsetX, offsetY) {
+    if (pointer.strength < 0.01) return;
+    const strength = pointer.strength;
+    const glow = ctx.createRadialGradient(pointer.x, pointer.y, 0, pointer.x, pointer.y, 210);
+    glow.addColorStop(0, rgba(accentRGB, 0.035 * strength));
+    glow.addColorStop(1, rgba(accentRGB, 0));
+    ctx.fillStyle = glow;
+    ctx.fillRect(pointer.x - 210, pointer.y - 210, 420, 420);
+
+    // Nearby intersections illuminate; the native cursor remains available.
+    const nearestX = Math.round((pointer.x - offsetX) / CELL) * CELL + offsetX;
+    const nearestY = Math.round((pointer.y - offsetY) / CELL) * CELL + offsetY;
+    ctx.lineWidth = 1;
+    for (let ix = -2; ix <= 2; ix++) {
+      for (let iy = -2; iy <= 2; iy++) {
+        const x = nearestX + ix * CELL, y = nearestY + iy * CELL;
+        const distance = Math.hypot(x - pointer.x, y - pointer.y);
+        if (distance > 170) continue;
+        const p = bend(x, y);
+        ctx.strokeStyle = rgba(accentRGB, (1 - distance / 170) * strength * 0.62);
+        ctx.beginPath();
+        ctx.moveTo(p[0] - 4, p[1]); ctx.lineTo(p[0] + 4, p[1]);
+        ctx.moveTo(p[0], p[1] - 4); ctx.lineTo(p[0], p[1] + 4);
+        ctx.stroke();
       }
     }
   }
 
-  function strokeLevels(segs, rgb, peak, width) {
-    ctx.lineWidth = width;
-    for (let k = 0; k < LEVELS; k++) {
-      const s = segs[k];
-      if (!s.length) continue;
-      ctx.strokeStyle = "rgba(" + rgb + "," + (((k + 0.5) / LEVELS) * peak).toFixed(3) + ")";
+  function drawRings() {
+    for (let i = rings.length - 1; i >= 0; i--) {
+      const ring = rings[i], age = elapsed - ring.started;
+      if (age > 1.4) { rings.splice(i, 1); continue; }
+      const progress = age / 1.4;
+      ctx.strokeStyle = rgba(accentRGB, (1 - progress) * 0.3);
+      ctx.lineWidth = 1 - progress * 0.5;
       ctx.beginPath();
-      for (let i = 0; i < s.length; i += 4) { ctx.moveTo(s[i], s[i + 1]); ctx.lineTo(s[i + 2], s[i + 3]); }
+      ctx.arc(ring.x, ring.y - (scrollPosition - ring.scroll) * 0.18, 8 + progress * 160, 0, TAU);
       ctx.stroke();
     }
   }
 
-  /* ---------- simulation ---------- */
-
-  function blast(x, y, big) {
-    waves.push({ x, y, r: 6, a: 0.55, max: big ? 480 : 320, big });
-    const count = big ? 40 : 24;
-    for (let i = 0; i < count; i++) {
-      const ang = Math.random() * Math.PI * 2;
-      const sp = 1.4 + Math.random() * (big ? 6.5 : 4.5);
-      sparks.push({ x, y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, r: 0.9 + Math.random() * 2.2, c: (Math.random() * 6) | 0, life: 0.85 + Math.random() * 0.6, decay: 0.018 });
+  function draw() {
+    if (!width || !height) return;
+    ctx.clearRect(0, 0, width, height);
+    const moving = !reduced.matches;
+    const offsetX = wrap(-scrollPosition * 0.025, CELL);
+    const offsetY = wrap(-scrollPosition * 0.18, CELL);
+    if (moving) { drawLightSweeps(); drawDepth(); }
+    drawStars(moving);
+    drawGrid(offsetX, offsetY);
+    if (moving) {
+      drawSignals();
+      drawPopups();
+      drawPointer(offsetX, offsetY);
+      drawRings();
     }
   }
 
-  function step(dt) {
-    simT += dt / 60;
-    const relax = 1 - Math.pow(0.975, dt); // pull back toward each node's own drift
-    const G = grabDist, G2 = G * G;
-    const pOn = pointer.active;
-    const pSpeed = Math.min(Math.hypot(pointer.vx, pointer.vy), 30);
+  function isRunning() { return !reduced.matches && !document.hidden; }
 
-    for (const n of nodes) {
-      if (n.a < 1) n.a = Math.min(1, n.a + 0.025 * dt);
-      n.tw += n.ts * dt;
-
-      // slow ambient current so the field never looks static
-      n.vx += Math.sin(n.y * 0.008 + simT * 0.35) * 0.0035 * dt;
-      n.vy += Math.cos(n.x * 0.008 + simT * 0.35) * 0.0035 * dt;
-
-      if (pOn) {
-        const dx = n.x - pointer.x, dy = n.y - pointer.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 < G2 && d2 > 0.25) {
-          const d = Math.sqrt(d2), ux = dx / d, uy = dy / d;
-          const fall = 1 - d / G; // 1 at the pointer, 0 at the edge of its reach
-          if (pointer.down) {
-            // press and hold: pull in, softened near the centre so nodes orbit instead of collapsing
-            const pull = fall * 0.15 * Math.min(1, d / 28);
-            n.vx -= ux * pull * dt;
-            n.vy -= uy * pull * dt;
-          } else {
-            // hover: a soft push that grows with pointer speed, plus a little drag along its path
-            const push = fall * fall * (0.08 + pSpeed * 0.012);
-            n.vx += (ux * push + pointer.vx * fall * 0.018 - uy * fall * 0.01) * dt;
-            n.vy += (uy * push + pointer.vy * fall * 0.018 + ux * fall * 0.01) * dt;
-          }
-        }
-      }
-
-      for (const w of waves) {
-        const dx = n.x - w.x, dy = n.y - w.y;
-        const d = Math.hypot(dx, dy);
-        const off = Math.abs(d - w.r);
-        if (off < 56 && d > 1) {
-          const f = (1 - off / 56) * 1.9 * (w.a / 0.55) * dt;
-          n.vx += (dx / d) * f;
-          n.vy += (dy / d) * f;
-        }
-      }
-
-      n.vx += (n.bvx - n.vx) * relax;
-      n.vy += (n.bvy - n.vy) * relax;
-      const sp = Math.hypot(n.vx, n.vy);
-      if (sp > MAX_SPEED) { n.vx *= MAX_SPEED / sp; n.vy *= MAX_SPEED / sp; }
-      n.x += n.vx * dt;
-      n.y += n.vy * dt;
-
-      if (n.x < -MARGIN) n.x += W + MARGIN * 2;
-      else if (n.x > W + MARGIN) n.x -= W + MARGIN * 2;
-      if (n.y < -MARGIN) n.y += H + MARGIN * 2;
-      else if (n.y > H + MARGIN) n.y -= H + MARGIN * 2;
+  function frame(time) {
+    frameId = 0;
+    if (!isRunning()) return;
+    if (!previousTime) previousTime = time - FRAME;
+    const difference = time - previousTime;
+    if (difference >= FRAME - 0.05) {
+      const dt = Math.min((lastDrawTime ? time - lastDrawTime : FRAME) / 1000, 0.08);
+      lastDrawTime = time;
+      // Preserve pacing on high-refresh displays; ignore sub-pixel clock error
+      // at an exact 60Hz boundary instead of skipping an otherwise due frame.
+      const remainder = difference % FRAME;
+      previousTime = time - (remainder > FRAME - 0.05 ? 0 : remainder);
+      elapsed += dt;
+      const ease = 1 - Math.exp(-dt * 8);
+      scrollPosition += (scrollTarget - scrollPosition) * ease;
+      pointer.x += (pointer.tx - pointer.x) * Math.min(1, ease * 1.6);
+      pointer.y += (pointer.ty - pointer.y) * Math.min(1, ease * 1.6);
+      pointer.strength += ((pointer.active ? 1 : 0) - pointer.strength) * ease;
+      updatePopups();
+      draw();
     }
-
-    // a still pointer has no speed, even though no event says so
-    const pd = Math.pow(0.82, dt);
-    pointer.vx *= pd;
-    pointer.vy *= pd;
-
-    const sd = Math.pow(0.965, dt);
-    for (const s of sparks) {
-      s.vx *= sd; s.vy *= sd; s.vy += 0.02 * dt;
-      s.x += s.vx * dt; s.y += s.vy * dt;
-      s.life -= s.decay * dt;
-    }
-    sparks = sparks.filter((s) => s.life > 0);
-
-    for (const w of waves) { w.r += 9.5 * dt; w.a *= Math.pow(0.945, dt); }
-    waves = waves.filter((w) => w.a > 0.02 && w.r < w.max);
+    frameId = requestAnimationFrame(frame);
   }
 
-  /* ---------- drawing ---------- */
-
-  function draw(animated) {
-    ctx.clearRect(0, 0, W, H);
-    if (!nodes.length) return;
-
-    updateZones();
-    buildGrid();
-    collectLinks();
-    strokeLevels(linkSegs, theme.link, theme.linkA, 1);
-
-    if (animated && pointer.active) {
-      for (const s of grabSegs) s.length = 0;
-      const G = grabDist, G2 = G * G;
-      for (const n of nodes) {
-        const dx = n.x - pointer.x, dy = n.y - pointer.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 >= G2) continue;
-        const strength = (1 - Math.sqrt(d2) / G) * n.a;
-        if (strength <= 0.01) continue;
-        grabSegs[Math.min(LEVELS - 1, (strength * LEVELS) | 0)].push(pointer.x, pointer.y, n.x, n.y);
-      }
-      strokeLevels(grabSegs, theme.grab, theme.grabA, 1);
-    }
-
-    for (const n of nodes) {
-      ctx.globalAlpha = n.a * (animated ? 0.6 + Math.sin(n.tw) * 0.35 : 0.75) * (zones.length ? calm(n.x, n.y) : 1);
-      ctx.fillStyle = theme.dots[n.c];
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    for (const s of sparks) {
-      ctx.globalAlpha = Math.min(1, s.life);
-      ctx.fillStyle = theme.dots[s.c];
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    for (const w of waves) {
-      ctx.lineWidth = w.big ? 2.5 : 2;
-      ctx.strokeStyle = "rgba(" + theme.ring + "," + w.a.toFixed(3) + ")";
-      ctx.beginPath(); ctx.arc(w.x, w.y, w.r, 0, Math.PI * 2); ctx.stroke();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = "rgba(" + theme.ring2 + "," + (w.a * 0.5).toFixed(3) + ")";
-      ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.7, 0, Math.PI * 2); ctx.stroke();
-    }
-  }
-
-  /* ---------- loop: one guarded rAF, paused when hidden or when motion is reduced ---------- */
-
-  let raf = 0, last = 0;
-  const running = () => !reduceMq.matches && !document.hidden;
-  function frame(now) {
-    raf = 0;
-    if (!running()) return;
-    const dt = Math.min(Math.max((now - last) / 16.667, 0.25), 3);
-    last = now;
-    step(dt);
-    draw(true);
-    raf = requestAnimationFrame(frame);
-  }
   function play() {
-    if (raf || !running()) return;
-    last = performance.now();
-    raf = requestAnimationFrame(frame);
+    if (!frameId && isRunning()) {
+      previousTime = 0;
+      lastDrawTime = 0;
+      frameId = requestAnimationFrame(frame);
+    }
   }
   function pause() {
-    if (raf) cancelAnimationFrame(raf);
-    raf = 0;
+    if (frameId) cancelAnimationFrame(frameId);
+    frameId = 0;
+    previousTime = 0;
+    lastDrawTime = 0;
   }
+  function releasePointer() { pointer.active = false; }
 
-  /* ---------- input ---------- */
-
-  function local(e) {
-    const r = canvas.getBoundingClientRect();
-    return [e.clientX - r.left, e.clientY - r.top];
-  }
-  function release() {
-    pointer.active = false;
-    pointer.down = false;
-    pointer.vx = pointer.vy = 0;
-  }
-
-  addEventListener("pointermove", (e) => {
-    const [x, y] = local(e);
-    const t = e.timeStamp || performance.now();
-    if (pointer.active && pointer.type === e.pointerType) {
-      const gap = t - pointer.t;
-      if (gap > 0 && gap < 120) {
-        // px per 60fps frame, lightly smoothed so noisy high-rate mice read steadily
-        const k = 16.667 / Math.max(gap, 4);
-        pointer.vx = pointer.vx * 0.35 + (x - pointer.x) * k * 0.65;
-        pointer.vy = pointer.vy * 0.35 + (y - pointer.y) * k * 0.65;
-        const sp = Math.hypot(pointer.vx, pointer.vy);
-        if (sp > 60) { pointer.vx *= 60 / sp; pointer.vy *= 60 / sp; }
-      }
-    } else {
-      pointer.vx = pointer.vy = 0;
-    }
-    pointer.x = x; pointer.y = y; pointer.t = t;
-    pointer.type = e.pointerType;
+  addEventListener("pointermove", (event) => {
+    if (!finePointer.matches || event.pointerType === "touch" || reduced.matches) return;
+    if (!pointer.active) { pointer.x = event.clientX; pointer.y = event.clientY; }
+    pointer.tx = event.clientX; pointer.ty = event.clientY;
     pointer.active = true;
-
-    const sp = Math.hypot(pointer.vx, pointer.vy);
-    if (running() && sp > 18 && sparks.length < 220) {
-      sparks.push({ x, y, vx: -pointer.vx * 0.04 + (Math.random() - 0.5), vy: -pointer.vy * 0.04 + (Math.random() - 0.5), r: 0.8 + Math.random() * 1.4, c: (Math.random() * 6) | 0, life: 0.55, decay: 0.022 });
-    }
   }, { passive: true });
-
-  addEventListener("pointerdown", (e) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    const [x, y] = local(e);
-    pointer.x = x; pointer.y = y; pointer.t = e.timeStamp || performance.now();
-    pointer.type = e.pointerType;
-    pointer.active = true;
-    pointer.down = true;
+  document.addEventListener("pointerout", (event) => {
+    if (!event.relatedTarget) releasePointer();
   }, { passive: true });
-
-  addEventListener("pointerup", (e) => {
-    pointer.down = false;
-    if (e.pointerType !== "mouse") release(); // a lifted finger or pen is gone
-  }, { passive: true });
-  addEventListener("pointercancel", release, { passive: true }); // e.g. a touch that became a scroll
-  root.addEventListener("mouseleave", release);
-  document.addEventListener("pointerout", (e) => { if (!e.relatedTarget && e.pointerType === "mouse") release(); });
-  addEventListener("blur", release);
-
-  addEventListener("click", (e) => {
-    if (!running() || e.detail === 0) return; // detail 0 = keyboard-activated, no real position
-    if (e.target.closest && e.target.closest("input, textarea, select, label, [contenteditable]")) return;
-    const [x, y] = local(e);
-    blast(x, y, e.detail >= 2);
+  addEventListener("pointercancel", releasePointer, { passive: true });
+  addEventListener("blur", releasePointer);
+  finePointer.addEventListener("change", () => {
+    if (!finePointer.matches) releasePointer();
   });
+  addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch") releasePointer();
+  }, { passive: true });
+  addEventListener("click", (event) => {
+    if (!isRunning() || !event.detail || event.button !== 0) return;
+    if (event.target.closest("input, textarea, select, label, [contenteditable]")) return;
+    if (rings.length >= 5) rings.shift();
+    rings.push({ x: event.clientX, y: event.clientY, scroll: scrollPosition, started: elapsed });
+  }, { passive: true });
+  addEventListener("scroll", () => { scrollTarget = window.scrollY || 0; }, { passive: true });
+  addEventListener("resize", resize, { passive: true });
+  if ("ResizeObserver" in window) new ResizeObserver(resize).observe(canvas);
 
-  /* ---------- environment ---------- */
-
-  function retheme() {
-    theme = THEMES[isDark() ? "dark" : "light"];
-    if (!running()) draw(false);
-  }
-  new MutationObserver(retheme).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
-  darkMq.addEventListener("change", retheme);
-
-  reduceMq.addEventListener("change", () => {
-    if (reduceMq.matches) { pause(); sparks = []; waves = []; nodes.forEach((n) => { n.a = 1; }); draw(false); }
-    else play();
+  new MutationObserver(readColors).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+  darkScheme.addEventListener("change", readColors);
+  reduced.addEventListener("change", () => {
+    pause();
+    rings.length = 0;
+    popups.length = 0;
+    nextPopupAt = elapsed + 0.25;
+    pointer.active = false;
+    pointer.strength = 0;
+    scrollPosition = scrollTarget;
+    draw();
+    play();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) pause();
-    else play();
+    if (document.hidden) { pause(); releasePointer(); }
+    else { scrollTarget = window.scrollY || 0; play(); }
   });
 
-  if ("ResizeObserver" in window) {
-    new ResizeObserver(() => resize()).observe(canvas);
-  } else {
-    addEventListener("resize", resize);
-  }
-  // pixel ratio changes (browser zoom, moving to another monitor) don't resize the box
-  addEventListener("resize", resize);
-
+  readColors();
   resize();
   play();
 })();

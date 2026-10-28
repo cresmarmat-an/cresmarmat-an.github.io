@@ -57,7 +57,16 @@ const ICON = {
 };
 
 const root = document.documentElement;
-const calmMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const motionMq = matchMedia("(prefers-reduced-motion: reduce)");
+let calmMotion = motionMq.matches;
+motionMq.addEventListener("change", () => {
+  calmMotion = motionMq.matches;
+  if (calmMotion) {
+    document.querySelectorAll(".proj-card").forEach((card) => {
+      card.getAnimations().forEach((animation) => animation.cancel());
+    });
+  }
+});
 const EASE = "cubic-bezier(.23,1,.32,1)";
 
 function el(tag, cls, text) {
@@ -564,7 +573,7 @@ function syncTheme() {
   // keep the browser UI colour in step with a forced theme
   themeMetas.forEach(({ m, content, media }) => {
     if (mode === "auto") { m.content = content; m.media = media; }
-    else { m.content = effective === "dark" ? "#22262F" : "#E0E5EC"; m.removeAttribute("media"); }
+    else { m.content = effective === "dark" ? "#111010" : "#faf8f5"; m.removeAttribute("media"); }
   });
 }
 themeBtn.addEventListener("click", () => {
@@ -595,92 +604,55 @@ function onScroll() {
 addEventListener("scroll", onScroll, { passive: true });
 addEventListener("resize", onScroll, { passive: true });
 
-/* ---------- portrait tilt (fine pointers only) ---------- */
+/* ---------- portrait: a single damped frame loop, with no pointer-event layout churn ---------- */
 
-const finePointer = matchMedia("(hover: hover) and (pointer: fine)").matches;
+const finePointerMq = matchMedia("(hover: hover) and (pointer: fine)");
 const photoImg = document.querySelector(".photo-blend img");
-const heroPhoto = document.querySelector(".hero-photo");
-if (finePointer && !calmMotion && photoImg && heroPhoto) {
-  heroPhoto.addEventListener("pointermove", (e) => {
-    const r = heroPhoto.getBoundingClientRect();
-    const px = (e.clientX - r.left) / r.width - 0.5;
-    const py = (e.clientY - r.top) / r.height - 0.5;
-    photoImg.style.setProperty("--ry", (px * 14).toFixed(2) + "deg");
-    photoImg.style.setProperty("--rx", (-py * 12).toFixed(2) + "deg");
-  });
-  heroPhoto.addEventListener("pointerleave", () => {
+const heroPhoto = document.querySelector(".portrait-stage");
+if (photoImg && heroPhoto) {
+  let frame = 0, lastTime = 0, pointer = null;
+  let x = 0, y = 0, targetX = 0, targetY = 0;
+  const paint = (time) => {
+    frame = 0;
+    if (calmMotion || !finePointerMq.matches || document.hidden) return;
+    if (pointer) {
+      const box = heroPhoto.getBoundingClientRect();
+      targetY = Math.max(-1, Math.min(1, (pointer.x - box.left) / box.width * 2 - 1)) * 4;
+      targetX = Math.max(-1, Math.min(1, (pointer.y - box.top) / box.height * 2 - 1)) * -3;
+      pointer = null;
+    }
+    const dt = lastTime ? Math.min((time - lastTime) / 1000, .05) : 1 / 60;
+    lastTime = time;
+    const ease = 1 - Math.exp(-dt * 15);
+    x += (targetX - x) * ease;
+    y += (targetY - y) * ease;
+    photoImg.style.setProperty("--rx", x.toFixed(3) + "deg");
+    photoImg.style.setProperty("--ry", y.toFixed(3) + "deg");
+    if (Math.abs(targetX - x) + Math.abs(targetY - y) > .008) frame = requestAnimationFrame(paint);
+    else lastTime = 0;
+  };
+  const schedule = () => { if (!frame) frame = requestAnimationFrame(paint); };
+  const reset = () => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = lastTime = x = y = targetX = targetY = 0;
+    pointer = null;
     photoImg.style.setProperty("--rx", "0deg");
     photoImg.style.setProperty("--ry", "0deg");
-  });
-}
-
-/* ---------- tech chips: a few at a time, each at a fresh spot around the portrait ---------- */
-
-const chips = [...document.querySelectorAll(".tech-chip")];
-if (chips.length && heroPhoto) {
-  const FADE = 450, GAP = 350, MAX_DELAY = 800, MIN_HOLD = 1900, HOLD_RANGE = 2200;
-  const maxUp = () => (heroPhoto.clientWidth < 420 ? 3 : heroPhoto.clientWidth < 520 ? 4 : 5);
-  const up = () => chips.filter((c) => c.classList.contains("show"));
-  const centerOf = (c) => ({ x: c._x + c.offsetWidth / 2, y: c._y + c.offsetHeight / 2 });
-
-  // pick the spot on a ring around the photo that is furthest from the chips already up
-  const place = (c) => {
-    const pw = heroPhoto.clientWidth, ph = heroPhoto.clientHeight;
-    if (!pw || !ph) return;
-    const w = c.offsetWidth, h = c.offsetHeight;
-    const others = up().filter((o) => o !== c && o._x != null).map(centerOf);
-    let best = null, bestScore = -1;
-    for (let t = 0; t < 28; t++) {
-      // skip the arc straight above the portrait so a chip never sits on the face
-      const a = -Math.PI / 3 + Math.random() * (Math.PI * 5 / 3);
-      const rx = pw * (0.34 + Math.random() * 0.1);
-      const ry = ph * (0.36 + Math.random() * 0.1);
-      const x = Math.max(2, Math.min(pw - w - 2, pw / 2 + Math.cos(a) * rx - w / 2));
-      const y = Math.max(2, Math.min(ph - h - 2, ph / 2 + Math.sin(a) * ry - h / 2));
-      const score = others.length ? Math.min(...others.map((o) => Math.hypot(x + w / 2 - o.x, y + h / 2 - o.y))) : 1e9;
-      if (score > bestScore) { bestScore = score; best = { x, y }; }
-      if (score > Math.max(w, 110)) break;
-    }
-    c._x = best.x; c._y = best.y;
-    c.style.left = best.x + "px";
-    c.style.top = best.y + "px";
   };
-
-  if (calmMotion) {
-    // no cycling: show a fixed handful, spaced out once
-    chips.slice(0, maxUp()).forEach((c) => { place(c); c.classList.add("show"); });
-  } else {
-    let cooldown = null;
-    const showOne = () => {
-      const pool = chips.filter((c) => !c.classList.contains("show") && !c._fading && c !== cooldown);
-      if (!pool.length) return;
-      const c = pool[(Math.random() * pool.length) | 0];
-      place(c);
-      const delay = Math.random() * MAX_DELAY;
-      const hold = MIN_HOLD + Math.random() * HOLD_RANGE;
-      c.style.transitionDelay = delay + "ms";
-      c.style.animationDelay = -Math.random() * 5 + "s";
-      c.classList.add("show");
-      setTimeout(() => {
-        c.style.transitionDelay = "0ms";
-        c.classList.remove("show");
-        c._fading = true; // don't move it while it is still fading out
-        cooldown = c;
-        setTimeout(() => { c._fading = false; refill(); }, FADE + GAP);
-      }, delay + hold);
-    };
-    const refill = () => { if (!document.hidden && up().length < maxUp()) showOne(); };
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) for (let i = 0; i < maxUp(); i++) setTimeout(refill, i * 300); });
-    for (let i = 0; i < maxUp(); i++) setTimeout(refill, 400 + i * 350);
-  }
-  let rt;
-  addEventListener("resize", () => {
-    clearTimeout(rt);
-    rt = setTimeout(() => {
-      up().slice(maxUp()).forEach((c) => c.classList.remove("show"));
-      up().forEach(place);
-    }, 120);
+  heroPhoto.addEventListener("pointermove", (event) => {
+    if (calmMotion || !finePointerMq.matches || event.pointerType === "touch") return;
+    pointer = { x: event.clientX, y: event.clientY };
+    schedule();
+  }, { passive: true });
+  heroPhoto.addEventListener("pointerleave", () => {
+    pointer = null;
+    targetX = targetY = 0;
+    if (!calmMotion && !document.hidden) schedule();
   });
+  motionMq.addEventListener("change", reset);
+  finePointerMq.addEventListener("change", reset);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) reset(); });
+  addEventListener("blur", reset);
 }
 
 /* ---------- boot ---------- */
