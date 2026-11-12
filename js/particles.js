@@ -1,6 +1,7 @@
 /* A living coordinate field: scroll moves the grid through depth, the pointer bends
-   nearby lines, and small signals travel along its circuits. All decoration is
-   painted into one transparent canvas; the page keeps its native interactions. */
+   nearby lines, small signals travel along its circuits, and a click lands like a
+   drop on water, sending ripples through the lattice. All decoration is painted into
+   one transparent canvas; the page keeps its native interactions. */
 (() => {
   const canvas = document.getElementById("bg-canvas");
   if (!canvas) return;
@@ -15,7 +16,22 @@
   const FRAME = 1000 / 60;
   const TAU = Math.PI * 2;
   const pointer = { x: 0, y: 0, tx: 0, ty: 0, strength: 0, active: false };
-  const rings = [];
+  // A click is a drop landing on water. Rings of displacement travel through the lattice,
+  // easing to a stop as they widen, and the stretch of grid each crest crosses lights up.
+  const RIPPLE_LIFE = 3.6;      // seconds until a drop has fully settled
+  const RIPPLE_SPEED = 540;     // px/s of the leading ring at the splash
+  const RIPPLE_REACH = 780;     // px the leading ring creeps toward as it slows
+  const RIPPLE_LENGTH = 92;     // px between neighbouring crests near the front
+  const RIPPLE_PUSH = 11;       // px the leading crest shoves grid points sideways
+  const RIPPLE_EDGE = 34;       // px over which the front fades in ahead of itself
+  const RIPPLE_GAIN = 1.9;      // how brightly a crest lights the lines it crosses
+  const RIPPLE_LEVELS = 8;      // brightness steps; segments of one step share a stroke
+  const drops = [];             // clicks that are still rippling
+  const ripples = [];           // per-frame state of each drop, read by warp()
+  const lit = Array.from({ length: 3 * RIPPLE_LEVELS }, () => []);
+  let rippleGlow = 0, rippleTone = 0; // set by warp(): how brightly a crest lights this point, and which
+  let rippleUX = 0, rippleUY = 0;     // ...and how much of the way to the drop is horizontal / vertical
+  let warpX = 0, warpY = 0;           // where warp() put the sample
   let width = 0, height = 0, pixelRatio = 1;
   let scrollTarget = window.scrollY || 0, scrollPosition = scrollTarget;
   let frameId = 0, previousTime = 0, lastDrawTime = 0, elapsed = 0;
@@ -238,13 +254,78 @@
     ctx.lineDashOffset = 0;
   }
 
-  // Displace samples radially for a soft local lens around the pointer.
+  // Advance every drop: where its leading ring is, how much energy is left, and how far
+  // the trailing crests reach. Rings stay attached to the grid as the page scrolls.
+  function updateRipples() {
+    ripples.length = 0;
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const drop = drops[i], age = elapsed - drop.started;
+      if (age >= RIPPLE_LIFE) { drops.splice(i, 1); continue; }
+      const travel = RIPPLE_REACH * (1 - Math.exp(-age * RIPPLE_SPEED / RIPPLE_REACH));
+      const settle = 1 - smoothstep((age - 2.2) / (RIPPLE_LIFE - 2.2));
+      const tail = 100 + age * 40;
+      const inner = Math.max(0, travel - tail * 4), outer = travel + RIPPLE_EDGE;
+      const shift = scrollPosition - drop.scroll;
+      ripples.push({
+        x: drop.x - shift * 0.025, y: drop.y - shift * 0.18,
+        travel, tail, inner2: inner * inner, outer2: outer * outer,
+        amp: Math.exp(-age / 2.6) / (1 + travel / 1100) * settle,
+        flash: Math.exp(-age / 0.16),
+      });
+    }
+  }
+
+  // Displace a sample for the pointer's soft lens and for any ripples passing through,
+  // leaving the result in warpX/warpY. As a side effect rippleGlow/rippleTone describe how
+  // a crest lights the sampled point. The long loops call this directly to avoid allocating.
+  function warp(x, y) {
+    rippleGlow = 0;
+    if (reduced.matches) { warpX = x; warpY = y; return; }
+    let ox = 0, oy = 0;
+    if (pointer.strength >= 0.002) {
+      const dx = x - pointer.x, dy = y - pointer.y;
+      const distance = dx * dx + dy * dy;
+      if (distance < 176000) { // past ~420px the lens is under a hundredth of a pixel
+        const influence = Math.exp(-distance / 22000) * 0.115 * pointer.strength;
+        ox = dx * influence; oy = dy * influence;
+      }
+    }
+    for (let i = 0; i < ripples.length; i++) {
+      const ring = ripples[i];
+      const dx = x - ring.x, dy = y - ring.y, d2 = dx * dx + dy * dy;
+      // the splash itself: the lattice flares around the point of impact
+      if (ring.flash > 0.03 && d2 < 24000) {
+        const flare = ring.flash * (1 - d2 / 24000);
+        if (flare > rippleGlow) {
+          const away = Math.sqrt(d2) || 1;
+          rippleGlow = flare; rippleTone = 0; rippleUX = Math.abs(dx) / away; rippleUY = Math.abs(dy) / away;
+        }
+      }
+      if (d2 < ring.inner2 || d2 > ring.outer2 || d2 < 1) continue;
+      const r = Math.sqrt(d2), behind = ring.travel - r;
+      // nothing ahead of the leading ring, then a train of crests that thins out behind it;
+      // crests sit closer together toward the centre, as they do on real water
+      const lead = behind >= 0 ? 1 : smoothstep(1 + behind / RIPPLE_EDGE);
+      const body = behind > 0 ? Math.exp(-behind / ring.tail) : 1;
+      const phase = (behind > 0 ? behind + behind * behind * 0.0007 : behind) * (TAU / RIPPLE_LENGTH);
+      const swell = Math.sin(phase);
+      const level = lead * body * ring.amp;
+      const shove = level * swell * RIPPLE_PUSH * smoothstep(r / 36) / r;
+      ox += dx * shove; oy += dy * shove;
+      if (swell > 0) {
+        const glow = level * swell * swell * RIPPLE_GAIN;
+        if (glow > rippleGlow) {
+          rippleGlow = glow; rippleTone = (Math.floor(phase / TAU) % 3 + 3) % 3;
+          rippleUX = Math.abs(dx) / r; rippleUY = Math.abs(dy) / r;
+        }
+      }
+    }
+    warpX = x + ox; warpY = y + oy;
+  }
+
   function bend(x, y) {
-    if (pointer.strength < 0.002 || reduced.matches) return [x, y];
-    const dx = x - pointer.x, dy = y - pointer.y;
-    const distance = dx * dx + dy * dy;
-    const influence = Math.exp(-distance / 22000) * 0.115 * pointer.strength;
-    return [x + dx * influence, y + dy * influence];
+    warp(x, y);
+    return [warpX, warpY];
   }
 
   function point(x, y, first) {
@@ -253,17 +334,61 @@
     else ctx.lineTo(p[0], p[1]);
   }
 
+  // Walks one grid line into the open path. While ripples are passing it samples finely
+  // enough to follow a crest, and queues every stretch a crest is lighting for drawRipples().
+  function traceLine(x, y, vertical, end, step, scale = 1, base = true) {
+    const rippling = ripples.length > 0;
+    let px = 0, py = 0, pg = 0, pt = 0;
+    for (let t = vertical ? y : x, first = true; t < end; t += step, first = false) {
+      if (vertical) warp(x, t);
+      else warp(t, y);
+      if (base) {
+        if (first) ctx.moveTo(warpX, warpY);
+        else ctx.lineTo(warpX, warpY);
+      }
+      if (!rippling) continue;
+      const here = rippleGlow * (0.3 + 0.7 * (vertical ? rippleUY : rippleUX));
+      const glow = (pg + here) / 2 * scale;
+      if (!first && glow > 0.06) {
+        const level = Math.min(RIPPLE_LEVELS - 1, Math.floor(Math.min(glow, 1) * RIPPLE_LEVELS));
+        lit[(here > pg ? rippleTone : pt) * RIPPLE_LEVELS + level].push(px, py, warpX, warpY);
+      }
+      px = warpX; py = warpY; pg = here; pt = rippleTone;
+    }
+  }
+
+  // Inside the band a crest is crossing, a finer mesh surfaces between the 64px lines, so the
+  // ripple reads as one continuous surface rather than dashes. It exists only while lit.
+  function traceMesh(offsetX, offsetY) {
+    if (!ripples.length) return;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    ripples.forEach((ring) => {
+      if (ring.amp < 0.08) return;
+      const reach = Math.sqrt(ring.outer2) + 24;
+      left = Math.min(left, ring.x - reach); right = Math.max(right, ring.x + reach);
+      top = Math.min(top, ring.y - reach); bottom = Math.max(bottom, ring.y + reach);
+    });
+    if (left > right) return;
+    const sub = CELL / 5;
+    left = Math.max(left, -CELL); right = Math.min(right, width + CELL);
+    top = Math.max(top, -CELL); bottom = Math.min(bottom, height + CELL);
+    for (let k = Math.ceil((left - offsetX) / sub); offsetX + k * sub < right; k++) {
+      if (k % 5) traceLine(offsetX + k * sub, top, true, bottom, 12, 0.62, false);
+    }
+    for (let k = Math.ceil((top - offsetY) / sub); offsetY + k * sub < bottom; k++) {
+      if (k % 5) traceLine(left, offsetY + k * sub, false, right, 12, 0.62, false);
+    }
+  }
+
   function drawGrid(offsetX, offsetY) {
+    const step = ripples.length ? 12 : 32;
     ctx.lineWidth = 0.65;
     ctx.strokeStyle = rgba(gridRGB, dark ? 0.18 : 0.15);
     ctx.beginPath();
-    for (let x = offsetX - CELL; x < width + CELL; x += CELL) {
-      for (let y = offsetY - CELL; y < height + CELL + 32; y += 32) point(x, y, y === offsetY - CELL);
-    }
-    for (let y = offsetY - CELL; y < height + CELL; y += CELL) {
-      for (let x = offsetX - CELL; x < width + CELL + 32; x += 32) point(x, y, x === offsetX - CELL);
-    }
+    for (let x = offsetX - CELL; x < width + CELL; x += CELL) traceLine(x, offsetY - CELL, true, height + CELL + 32, step);
+    for (let y = offsetY - CELL; y < height + CELL; y += CELL) traceLine(offsetX - CELL, y, false, width + CELL + 32, step);
     ctx.stroke();
+    traceMesh(offsetX, offsetY);
 
     // Sparse registration marks anchor the field without making every cell busy.
     ctx.strokeStyle = rgba(gridRGB, dark ? 0.32 : 0.27);
@@ -354,16 +479,45 @@
     }
   }
 
-  function drawRings() {
-    for (let i = rings.length - 1; i >= 0; i--) {
-      const ring = rings[i], age = elapsed - ring.started;
-      if (age > 1.4) { rings.splice(i, 1); continue; }
-      const progress = age / 1.4;
-      ctx.strokeStyle = rgba(accentRGB, (1 - progress) * 0.3);
-      ctx.lineWidth = 1 - progress * 0.5;
-      ctx.beginPath();
-      ctx.arc(ring.x, ring.y - (scrollPosition - ring.scroll) * 0.18, 8 + progress * 160, 0, TAU);
-      ctx.stroke();
+  // Paints what the crests light: the queued line segments, then the junctions they cross.
+  // The rings are never drawn as shapes; they exist only as the grid moving and glowing.
+  function drawRipples(offsetX, offsetY) {
+    if (!ripples.length) return;
+    const strength = dark ? 0.86 : 0.7;
+    ctx.lineCap = "round";
+    for (let tone = 0; tone < 3; tone++) {
+      for (let level = 0; level < RIPPLE_LEVELS; level++) {
+        const segments = lit[tone * RIPPLE_LEVELS + level];
+        if (!segments.length) continue;
+        const alpha = (level + 0.5) / RIPPLE_LEVELS * strength;
+        ctx.beginPath();
+        let endX = NaN, endY = NaN;
+        for (let i = 0; i < segments.length; i += 4) {
+          if (segments[i] !== endX || segments[i + 1] !== endY) ctx.moveTo(segments[i], segments[i + 1]);
+          ctx.lineTo(endX = segments[i + 2], endY = segments[i + 3]);
+        }
+        ctx.strokeStyle = rgba(channelColor(tone), alpha);
+        ctx.lineWidth = 1.25;
+        ctx.stroke();
+        segments.length = 0;
+      }
+    }
+    ctx.lineCap = "butt";
+    ctx.lineWidth = 1.2;
+    for (let x = offsetX - CELL; x < width + CELL; x += CELL) {
+      for (let y = offsetY - CELL; y < height + CELL; y += CELL) {
+        warp(x, y);
+        const glow = Math.min(rippleGlow, 1);
+        if (glow < 0.07) continue;
+        const color = channelColor(rippleTone), arm = 3 + glow * 3.5;
+        ctx.strokeStyle = rgba(color, Math.min(1, glow * 1.2) * strength);
+        ctx.beginPath();
+        ctx.moveTo(warpX - arm, warpY); ctx.lineTo(warpX + arm, warpY);
+        ctx.moveTo(warpX, warpY - arm); ctx.lineTo(warpX, warpY + arm);
+        ctx.stroke();
+        ctx.fillStyle = rgba(color, Math.min(1, glow * 1.4) * strength);
+        ctx.fillRect(warpX - 1.3, warpY - 1.3, 2.6, 2.6);
+      }
     }
   }
 
@@ -377,10 +531,10 @@
     drawStars(moving);
     drawGrid(offsetX, offsetY);
     if (moving) {
+      drawRipples(offsetX, offsetY);
       drawSignals();
       drawPopups();
       drawPointer(offsetX, offsetY);
-      drawRings();
     }
   }
 
@@ -405,6 +559,7 @@
       pointer.y += (pointer.ty - pointer.y) * Math.min(1, ease * 1.6);
       pointer.strength += ((pointer.active ? 1 : 0) - pointer.strength) * ease;
       updatePopups();
+      updateRipples();
       draw();
     }
     frameId = requestAnimationFrame(frame);
@@ -445,8 +600,8 @@
   addEventListener("click", (event) => {
     if (!isRunning() || !event.detail || event.button !== 0) return;
     if (event.target.closest("input, textarea, select, label, [contenteditable]")) return;
-    if (rings.length >= 5) rings.shift();
-    rings.push({ x: event.clientX, y: event.clientY, scroll: scrollPosition, started: elapsed });
+    if (drops.length >= 5) drops.shift();
+    drops.push({ x: event.clientX, y: event.clientY, scroll: scrollPosition, started: elapsed });
   }, { passive: true });
   addEventListener("scroll", () => { scrollTarget = window.scrollY || 0; }, { passive: true });
   addEventListener("resize", resize, { passive: true });
@@ -456,7 +611,8 @@
   darkScheme.addEventListener("change", readColors);
   reduced.addEventListener("change", () => {
     pause();
-    rings.length = 0;
+    drops.length = 0;
+    ripples.length = 0;
     popups.length = 0;
     nextPopupAt = elapsed + 0.25;
     pointer.active = false;
@@ -466,7 +622,8 @@
     play();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { pause(); releasePointer(); }
+    // a drop frozen mid-ripple would resume where it left off, so let it go
+    if (document.hidden) { pause(); releasePointer(); drops.length = 0; ripples.length = 0; }
     else { scrollTarget = window.scrollY || 0; play(); }
   });
 

@@ -22,7 +22,6 @@
   let lastScrollY = scrollY;
   let lastScrollTime = performance.now();
   let scrollTimer;
-  const impacts = new Map();
 
   const canMove = () => fine.matches && !reduce.matches && !document.hidden;
   const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
@@ -183,7 +182,6 @@
   function environmentChanged() {
     root.classList.toggle("motion-paused", document.hidden);
     resetPointer();
-    impacts.forEach((cleanup) => cleanup());
     clearTimeout(scrollTimer);
     scrollSpeed = 0;
     scrollDirection = 0;
@@ -204,41 +202,6 @@
   document.addEventListener("visibilitychange", environmentChanged);
   addEventListener("pagehide", environmentChanged);
   schedule();
-
-  // Decoration is added after the native click; navigation, focus, and button
-  // handlers remain untouched. Touch and keyboard activation get the same cue.
-  document.addEventListener("click", (event) => {
-    if (reduce.matches || document.hidden || !(event.target instanceof Element)) return;
-    const control = event.target.closest(".btn, .icon-btn, .nav-link")
-      || event.target.closest(".proj-card:not(.skeleton)");
-    if (!control || control.disabled) return;
-    const box = control.getBoundingClientRect();
-    if (!box.width || !box.height) return;
-    impacts.get(control)?.();
-    // Bound retained decorations even during rapid clicking across a long grid.
-    if (impacts.size >= 8) impacts.values().next().value();
-    const x = event.detail ? clamp(event.clientX - box.left, 0, box.width) : box.width / 2;
-    const y = event.detail ? clamp(event.clientY - box.top, 0, box.height) : box.height / 2;
-    const size = 2 * Math.hypot(Math.max(x, box.width - x), Math.max(y, box.height - y));
-    const ripple = document.createElement("span");
-    ripple.className = "control-ripple";
-    ripple.setAttribute("aria-hidden", "true");
-    ripple.style.setProperty("--ripple-x", x.toFixed(1) + "px");
-    ripple.style.setProperty("--ripple-y", y.toFixed(1) + "px");
-    ripple.style.setProperty("--ripple-size", size.toFixed(1) + "px");
-    let cleanupTimer;
-    const cleanup = () => {
-      clearTimeout(cleanupTimer);
-      ripple.remove();
-      control.classList.remove("impact");
-      impacts.delete(control);
-    };
-    impacts.set(control, cleanup);
-    ripple.addEventListener("animationend", cleanup, { once: true });
-    control.classList.add("impact");
-    control.append(ripple);
-    cleanupTimer = setTimeout(cleanup, 1400);
-  });
 
   /* Search remains useful with keyboard navigation and screen readers. */
   const search = document.getElementById("search");
